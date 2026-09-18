@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../main.dart' show routeObserver;
 import '../pages/legal/legal_page.dart';
+import '../preview/preview_page.dart';
 import 'deep_link.dart';
 import 'root_navigator.dart';
 
@@ -21,6 +22,15 @@ GoRouter buildAppRouter({GlobalKey<NavigatorState>? navigatorKey}) {
       path: '/',
       pageBuilder: (context, state) => const NoTransitionPage(
         child: AuthWrapper(),
+      ),
+    ),
+    // The course editor's preview surface. Deliberately outside AuthWrapper: it is
+    // driven entirely by JSON posted in from the parent frame, there is no student
+    // session behind it, and nothing it does is written anywhere.
+    GoRoute(
+      path: '/preview',
+      pageBuilder: (context, state) => const NoTransitionPage(
+        child: PreviewPage(),
       ),
     ),
     // Deep links: both resolve a course by its join code/PIN (e.g. 676767).

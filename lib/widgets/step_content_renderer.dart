@@ -6,7 +6,6 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_html/flutter_html.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import 'package:video_player/video_player.dart';
 import '../core/utils/image_url.dart';
 import '../core/utils/content_embeds.dart';
@@ -15,8 +14,17 @@ import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
 import '../models/block_model.dart';
 import '../models/step_navigation.dart';
+import '../preview/preview_mode.dart';
 import 'markdown_latex_widget.dart';
+import 'network_image_with_fallback.dart';
 
+/// Renders one step's content.
+///
+/// Inside the editor's preview (see `preview/preview_mode.dart`) the passive leaves
+/// — text, media, the solution, an option's feedback — are wrapped in a
+/// `PreviewTarget`, so clicking one takes the author to the field that produced it.
+/// The interactive controls are deliberately left alone: clicking an answer in the
+/// preview answers the question, which is what "try it" has to mean.
 class StepContentRenderer extends StatelessWidget {
   final BlockStep step;
   final StepAnswerState? answerState;
@@ -190,18 +198,18 @@ class StepContentRenderer extends StatelessWidget {
     final qType = config.type;
 
     if (qType == 'true_false') {
-      widgets.addAll(_buildTrueFalseButtons(config, isAnswered));
+      widgets.addAll(_buildTrueFalseButtons(context, config, isAnswered));
     } else if (qType == 'numeric') {
       widgets.addAll(_buildNumericQuestion(config, isAnswered));
     } else if (qType == 'open') {
       widgets.addAll(_buildOpenQuestion(config, isAnswered));
     } else if (config.allowMultiple) {
       // allow_multiple: checkbox-style multi-select (takes priority over show_answers)
-      widgets.addAll(_buildCheckboxOptions(config, isAnswered));
+      widgets.addAll(_buildCheckboxOptions(context, config, isAnswered));
     } else {
       // Default: radio-style single select
       // (show_answers only controls whether correct answer is revealed after answering)
-      widgets.addAll(_buildRadioOptions(config, isAnswered));
+      widgets.addAll(_buildRadioOptions(context, config, isAnswered));
     }
 
     // Feedback for selected option(s)
@@ -237,7 +245,28 @@ class StepContentRenderer extends StatelessWidget {
 
   // ─── Radio Option Cards (single select) ──────────────────
 
-  List<Widget> _buildRadioOptions(EvaluationConfig config, bool isAnswered) {
+  /// What tapping an answer does.
+  ///
+  /// Normally it answers. In the editor's expanded preview the author is reading
+  /// the card, not taking it, so the tap reports where that option is authored and
+  /// the editor focuses it. Outside preview mode `interactive` is true and this is
+  /// exactly the callback it always was.
+  VoidCallback? _onOptionTap(
+    BuildContext context,
+    String optionId,
+    bool isAnswered,
+    VoidCallback answer,
+  ) {
+    final mode = PreviewMode.of(context);
+    if (mode.enabled && !mode.interactive) {
+      return () => mode.onRefTapped?.call(
+            mode.refFor(stepId: step.stepId, optionId: optionId, field: 'text'),
+          );
+    }
+    return isAnswered ? null : answer;
+  }
+
+  List<Widget> _buildRadioOptions(BuildContext context, EvaluationConfig config, bool isAnswered) {
     return config.options.map((option) {
       final isSelected = answerState?.selectedOptionId == option.id;
       final isCorrect = option.isCorrect;
@@ -270,7 +299,12 @@ class StepContentRenderer extends StatelessWidget {
         padding: const EdgeInsets.only(bottom: 8),
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTap: isAnswered ? null : () => onOptionSelected?.call(option.id),
+          onTap: _onOptionTap(
+            context,
+            option.id,
+            isAnswered,
+            () => onOptionSelected?.call(option.id),
+          ),
           child: Container(
             width: double.infinity,
             padding: const EdgeInsets.all(16),
@@ -324,7 +358,7 @@ class StepContentRenderer extends StatelessWidget {
 
   // ─── Checkbox Option Cards (multi select) ─────────────────
 
-  List<Widget> _buildCheckboxOptions(EvaluationConfig config, bool isAnswered) {
+  List<Widget> _buildCheckboxOptions(BuildContext context, EvaluationConfig config, bool isAnswered) {
     final selectedIds = answerState?.selectedOptionIds ?? {};
 
     return config.options.map((option) {
@@ -350,17 +384,15 @@ class StepContentRenderer extends StatelessWidget {
         padding: const EdgeInsets.only(bottom: 8),
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTap: isAnswered
-              ? null
-              : () {
-                  final newSet = Set<String>.from(selectedIds);
-                  if (isSelected) {
-                    newSet.remove(option.id);
-                  } else {
-                    newSet.add(option.id);
-                  }
-                  onMultipleOptionsSelected?.call(newSet);
-                },
+          onTap: _onOptionTap(context, option.id, isAnswered, () {
+            final newSet = Set<String>.from(selectedIds);
+            if (isSelected) {
+              newSet.remove(option.id);
+            } else {
+              newSet.add(option.id);
+            }
+            onMultipleOptionsSelected?.call(newSet);
+          }),
           child: Container(
             width: double.infinity,
             padding: const EdgeInsets.all(16),
@@ -390,7 +422,7 @@ class StepContentRenderer extends StatelessWidget {
 
   // ─── True/False Buttons ──────────────────────────────────
 
-  List<Widget> _buildTrueFalseButtons(EvaluationConfig config, bool isAnswered) {
+  List<Widget> _buildTrueFalseButtons(BuildContext context, EvaluationConfig config, bool isAnswered) {
     return [
       Row(
         children: config.options.map((option) {
@@ -415,7 +447,12 @@ class StepContentRenderer extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 4),
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: isAnswered ? null : () => onOptionSelected?.call(option.id),
+                onTap: _onOptionTap(
+                  context,
+                  option.id,
+                  isAnswered,
+                  () => onOptionSelected?.call(option.id),
+                ),
                 child: Container(
                   padding: const EdgeInsets.symmetric(vertical: 20),
                   decoration: BoxDecoration(
@@ -497,6 +534,15 @@ class StepContentRenderer extends StatelessWidget {
   // ─── Feedback Banner ─────────────────────────────────────
 
   Widget _buildFeedbackBanner(EvaluationOption option) {
+    return PreviewTarget(
+      stepId: step.stepId,
+      optionId: option.id,
+      field: 'feedback',
+      child: _buildFeedbackBannerBody(option),
+    );
+  }
+
+  Widget _buildFeedbackBannerBody(EvaluationOption option) {
     final isCorrect = option.isCorrect;
     return Container(
       width: double.infinity,
@@ -549,6 +595,14 @@ class StepContentRenderer extends StatelessWidget {
   // ─── Solution Banner ─────────────────────────────────────
 
   Widget _buildSolutionBanner(EvaluationConfig config) {
+    return PreviewTarget(
+      stepId: step.stepId,
+      field: 'question.solution',
+      child: _buildSolutionBannerBody(config),
+    );
+  }
+
+  Widget _buildSolutionBannerBody(EvaluationConfig config) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12),
@@ -811,6 +865,14 @@ class StepContentRenderer extends StatelessWidget {
   /// Render rich content. Extracts inline <video> embeds first, then renders
   /// the remaining text segments as markdown/HTML in document order.
   Widget _buildRichContent(String text, String? html, bool isMarkdown) {
+    return PreviewTarget(
+      stepId: step.stepId,
+      field: 'content',
+      child: _buildRichContentBody(text, html, isMarkdown),
+    );
+  }
+
+  Widget _buildRichContentBody(String text, String? html, bool isMarkdown) {
     if (hasVideoEmbed(text)) {
       final parts = parseContentEmbeds(text);
       final children = <Widget>[];
@@ -873,67 +935,87 @@ class StepContentRenderer extends StatelessWidget {
 
   Widget _buildStepImage(StepImage image) {
     if (image.url.isEmpty) return const SizedBox.shrink();
+    return PreviewTarget(
+      stepId: step.stepId,
+      field: 'image.url',
+      child: _buildStepImageBody(image),
+    );
+  }
 
-    final url = resolveImageUrl(image.url);
-    final isSvg = url.toLowerCase().endsWith('.svg') ||
-        url.toLowerCase().contains('.svg?');
-
+  Widget _buildStepImageBody(StepImage image) {
+    // Direct URL first, proxy only as a fallback — see
+    // `NetworkImageWithFallback` for why. `image.url` is passed raw (not
+    // pre-resolved with `resolveImageUrl`): the widget resolves it itself,
+    // only for the second attempt.
     return ClipRRect(
       borderRadius: AppDecorations.radiusM,
-      child: isSvg
-          ? ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 240),
-              child: SvgPicture.network(url, fit: BoxFit.contain),
-            )
-          : Image.network(
-              url,
-              fit: BoxFit.contain,
-              width: double.infinity,
-              loadingBuilder: (context, child, loadingProgress) {
-                if (loadingProgress == null) return child;
-                return Container(
-                  height: 180,
-                  width: double.infinity,
-                  decoration: BoxDecoration(
-                    color: AppColors.background,
-                    borderRadius: AppDecorations.radiusM,
-                  ),
-                  child: Center(
-                    child: CircularProgressIndicator(
-                      value: loadingProgress.expectedTotalBytes != null
-                          ? loadingProgress.cumulativeBytesLoaded /
-                              loadingProgress.expectedTotalBytes!
-                          : null,
-                      strokeWidth: 2,
-                      color: AppColors.primaryDark24,
-                    ),
-                  ),
-                );
-              },
-              errorBuilder: (_, error, ___) {
-                return Container(
-                  height: 120,
-                  width: double.infinity,
-                  decoration: BoxDecoration(
-                    color: AppColors.background,
-                    borderRadius: AppDecorations.radiusM,
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.broken_image, size: 40, color: Colors.grey),
-                      const SizedBox(height: 8),
-                      if (image.alt != null)
-                        Text(
-                          image.alt!,
-                          style: AppTextStyles.meta(color: AppColors.primaryDark64),
-                          textAlign: TextAlign.center,
-                        ),
-                    ],
-                  ),
-                );
-              },
+      child: NetworkImageWithFallback(
+        url: image.url,
+        fit: BoxFit.contain,
+        width: double.infinity,
+        // Matches the SVG branch's previous ConstrainedBox(maxHeight: 240) —
+        // an SVG has no intrinsic size, so without a cap it can blow up to
+        // fill all available height.
+        svgMaxHeight: 240,
+        svgPlaceholderBuilder: (_) => Container(
+          height: 180,
+          width: double.infinity,
+          decoration: BoxDecoration(
+            color: AppColors.background,
+            borderRadius: AppDecorations.radiusM,
+          ),
+          child: Center(
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: AppColors.primaryDark24,
             ),
+          ),
+        ),
+        loadingBuilder: (context, child, loadingProgress) {
+          if (loadingProgress == null) return child;
+          return Container(
+            height: 180,
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: AppColors.background,
+              borderRadius: AppDecorations.radiusM,
+            ),
+            child: Center(
+              child: CircularProgressIndicator(
+                value: loadingProgress.expectedTotalBytes != null
+                    ? loadingProgress.cumulativeBytesLoaded /
+                        loadingProgress.expectedTotalBytes!
+                    : null,
+                strokeWidth: 2,
+                color: AppColors.primaryDark24,
+              ),
+            ),
+          );
+        },
+        errorBuilder: (_, error, ___) {
+          return Container(
+            height: 120,
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: AppColors.background,
+              borderRadius: AppDecorations.radiusM,
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.broken_image, size: 40, color: Colors.grey),
+                const SizedBox(height: 8),
+                if (image.alt != null)
+                  Text(
+                    image.alt!,
+                    style: AppTextStyles.meta(color: AppColors.primaryDark64),
+                    textAlign: TextAlign.center,
+                  ),
+              ],
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -951,6 +1033,14 @@ class StepContentRenderer extends StatelessWidget {
   /// Build a video player for an explicit [url] (used by both the dedicated
   /// video step and inline <video> embeds extracted from text content).
   Widget _buildStepVideoUrl(String url) {
+    return PreviewTarget(
+      stepId: step.stepId,
+      field: 'video.url',
+      child: _buildStepVideoUrlBody(url),
+    );
+  }
+
+  Widget _buildStepVideoUrlBody(String url) {
     if (url.isEmpty) return const SizedBox.shrink();
 
     // Use parent-provided pooled controller if available

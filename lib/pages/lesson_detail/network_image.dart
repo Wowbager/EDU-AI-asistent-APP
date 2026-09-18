@@ -1,10 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import '../../core/theme/app_theme.dart';
-import '../../core/utils/image_url.dart';
 import '../../models/block_model.dart';
+import '../../widgets/network_image_with_fallback.dart';
 
 /// Network image renderer that handles both raster and SVG sources.
+///
+/// Delegates the actual loading to `NetworkImageWithFallback`, which tries
+/// the direct URL before the `/api/proxy/image` proxy — see that widget's
+/// doc comment for why a single, unconditional proxy hop is the wrong
+/// default. This class only adapts that widget's builder-style API to the
+/// simpler "one error widget, one loading widget" shape this codebase's
+/// lesson-detail cards already pass in.
 class LessonNetworkImage extends StatelessWidget {
   final String rawUrl;
   final BoxFit fit;
@@ -25,32 +31,18 @@ class LessonNetworkImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final url = resolveImageUrl(rawUrl);
-    final isSvg = url.toLowerCase().endsWith('.svg') ||
-        url.toLowerCase().contains('.svg?');
     final fallback = errorWidget ??
         Icon(Icons.broken_image, size: 48, color: AppColors.progressFill);
 
-    if (isSvg) {
-      return ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: height ?? 240,
-          maxWidth: width ?? double.infinity,
-        ),
-        child: SvgPicture.network(
-          url,
-          fit: fit,
-          placeholderBuilder:
-              loadingWidget != null ? (_) => loadingWidget! : null,
-        ),
-      );
-    }
-
-    return Image.network(
-      url,
+    return NetworkImageWithFallback(
+      url: rawUrl,
       fit: fit,
       width: width,
       height: height,
+      // An SVG has no intrinsic size, so it needs the same cap the old SVG
+      // branch applied via its own ConstrainedBox.
+      svgMaxHeight: height ?? 240,
+      svgPlaceholderBuilder: loadingWidget != null ? (_) => loadingWidget! : null,
       errorBuilder: (context, error, stack) => fallback,
       loadingBuilder: loadingWidget != null
           ? (context, child, progress) {

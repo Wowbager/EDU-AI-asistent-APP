@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/image_url.dart';
 import '../../models/course_model.dart';
+import '../../widgets/network_image_with_fallback.dart';
 import 'card_container.dart';
 
 /// Legacy text block card (LessonBlock format).
@@ -68,8 +69,13 @@ class LessonLegacyImageCard extends StatelessWidget {
                 : block.imageUrl != null
                     ? ClipRRect(
                         borderRadius: AppDecorations.radiusM,
-                        child: Image.network(
-                          resolveImageUrl(block.imageUrl!),
+                        // Direct URL first, proxy only as a fallback — see
+                        // `NetworkImageWithFallback`. Passed the raw
+                        // `block.imageUrl`, not pre-resolved, since the
+                        // widget only reaches for `resolveImageUrl` itself
+                        // on the second attempt.
+                        child: NetworkImageWithFallback(
+                          url: block.imageUrl!,
                           fit: BoxFit.cover,
                           width: double.infinity,
                           height: 180,
@@ -130,6 +136,15 @@ class LessonLegacyVideoCard extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: AppColors.videoDark,
                   borderRadius: AppDecorations.radiusM,
+                  // Left on the single proxied attempt rather than moved onto
+                  // `NetworkImageWithFallback`: this is a `DecorationImage`
+                  // built from a plain `ImageProvider`, not an `Image`/
+                  // `SvgPicture` widget with an `errorBuilder` to hook a
+                  // retry into, and it's a video thumbnail, not the
+                  // step/solution content the direct-first fix targets — on
+                  // failure it just leaves the dark placeholder background
+                  // showing under the play button, not a broken-image icon
+                  // blocking the lesson.
                   image: block.videoThumbnail != null
                       ? DecorationImage(
                           image: NetworkImage(
