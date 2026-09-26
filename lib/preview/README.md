@@ -150,7 +150,8 @@ actually jumps, so branching is testable. The question mark opens the app's own 
 sheet (`preview_hint.dart`), with nothing recorded. A finished card keeps the engine
 it was played in, so it keeps its answers and shows only the steps that were
 visited, as the app's list does. It used to be re-created as "completed", which
-forgot both.
+forgot both. A card a branch jumped over is drawn unfinished, on its first step, as
+the app draws it, not as history with every step open.
 
 No `PreviewTarget` is live here — `interactive: true` switches them off — so a tap on
 text or a picture does what it does for a pupil, and nothing marks which step is

@@ -28,7 +28,8 @@
 //    played in until the run goes back past it, so the history above the current
 //    card shows the answers given and only the steps that were visited, as the
 //    app's list does. It used to be re-created as "completed", which forgot both
-//    and drew every step of it.
+//    and drew every step of it. A card a branch jumped over was never played, and
+//    is drawn unfinished, as the app draws it.
 //  * **Positions are card ids, not indices.** The author edits while the run is
 //    open: cards are reordered and deleted under it. An index into `blocks` then
 //    points at a different card, so the history and the current card are kept by
@@ -126,8 +127,12 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
   /// current until it leaves the screen.
   final Map<String, int> _mountedIn = {};
 
-  /// Make [blockId] the current card in a fresh engine.
+  /// Make [blockId] the current card in a fresh engine. The cards after it were
+  /// not played in this run any more (a back, or a branch to an earlier card), so
+  /// they are forgotten, as the app resets them.
   void _mount(String blockId) {
+    final at = _indexOf(blockId);
+    _mountedIn.removeWhere((id, _) => _indexOf(id) > at);
     _generation++;
     _mountedIn[blockId] = _generation;
   }
@@ -364,7 +369,9 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
             block: block,
             exportMode: widget.exportMode,
             isCurrent: isCurrent,
-            isCompleted: !isCurrent,
+            // A card a `go_to` jumped over was never played: the app draws it
+            // unfinished, on its first step, not as history with every step.
+            isCompleted: !isCurrent && _mountedIn.containsKey(block.blockId),
             onHintRequested: () => showPreviewHint(context, block),
             onBlockCompleted: ({int earnedXp = 0, double scoreKoef = 1.0, String? mark}) {
               widget.onCompleted(xp: earnedXp, scoreKoef: scoreKoef, mark: mark);

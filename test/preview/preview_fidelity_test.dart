@@ -254,6 +254,25 @@ void main() {
       expect(screens.last, ['s1', 's2']);
     });
 
+    testWidgets('a card a branch jumped over is not drawn as finished', (tester) async {
+      await run(tester, blocks: [
+        ContentBlock.fromJson({
+          'block_id': 'B1',
+          'type': 'display',
+          'steps': [
+            {'id': 's1', 'type': 'text', 'order': 1, 'content': 'Odsud', 'go_to': 'B3'},
+          ],
+        }),
+        _display('B2', ['Přeskočená první', 'Přeskočená druhá']),
+        _display('B3', ['Cíl']),
+      ]);
+      await next(tester);
+      expect(find.textContaining('Cíl'), findsOneWidget);
+      // As in the app: unfinished, on its first step — not every step, checked off.
+      expect(find.textContaining('Přeskočená první'), findsOneWidget);
+      expect(find.textContaining('Přeskočená druhá'), findsNothing);
+    });
+
     testWidgets('a finished card keeps its answers', (tester) async {
       await run(tester, blocks: [
         ContentBlock.fromJson({
