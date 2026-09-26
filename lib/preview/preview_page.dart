@@ -39,6 +39,11 @@ class _PreviewPageState extends State<PreviewPage> {
   SemanticsHandle? _semantics;
 
   ContentBlock? _block;
+
+  /// Every block `setBlock` sent, in order. The editor sends the blocks one teacher's
+  /// card is made of (one per question); Náhled draws them one under another, as a
+  /// pupil meets them. `_block` is the first.
+  List<ContentBlock> _blocks = const [];
   Map<String, dynamic>? _course;
   String? _lessonId;
   String? _startBlockId;
@@ -128,12 +133,16 @@ class _PreviewPageState extends State<PreviewPage> {
 
   void _applyBlock(Map<String, dynamic> message) {
     final raw = message['block'];
-    final blockJson = raw is List && raw.isNotEmpty
-        ? raw.first as Map<String, dynamic>
-        : raw as Map<String, dynamic>;
+    final blocksJson = raw is List
+        ? raw.cast<Map<String, dynamic>>()
+        : [raw as Map<String, dynamic>];
+    if (blocksJson.isEmpty) throw const FormatException('setBlock without a block');
 
-    final block = ContentBlock.fromJson(blockJson);
-    final stepIds = block.steps.map((s) => s.stepId).toList();
+    final blocks = blocksJson.map(ContentBlock.fromJson).toList();
+    final block = blocks.first;
+    final stepIds = [
+      for (final b in blocks) ...b.steps.map((s) => s.stepId),
+    ];
     final remount = message['remount'] == true || !_sameIds(stepIds, _stepIds);
 
     setState(() {
@@ -142,6 +151,7 @@ class _PreviewPageState extends State<PreviewPage> {
         _position = null;
       }
       _block = block;
+      _blocks = blocks;
       _course = null;
       _lessonId = null;
       _startBlockId = null;
@@ -167,6 +177,7 @@ class _PreviewPageState extends State<PreviewPage> {
       _lessonId = message['lessonId'] as String?;
       _startBlockId = message['startBlockId'] as String?;
       _block = null;
+      _blocks = const [];
       _exportMode = _modeFrom(message['exportMode']);
       _view = (message['view'] as String?) ?? 'play';
       // Everything the single-card view was holding. None of it is read down the
@@ -225,6 +236,8 @@ class _PreviewPageState extends State<PreviewPage> {
         if (_error != null) 'error': _error,
         if (lesson) 'lessonId': _lessonId,
         'blockId': position?.blockId ?? block?.blockId,
+        if (!lesson && _blocks.isNotEmpty)
+          'blockIds': [for (final b in _blocks) b.blockId],
         'stepId': _view == 'expanded' ? _highlightedStepId : position?.stepId,
         'shownStepIds': _view == 'expanded'
             ? _stepIds
@@ -266,13 +279,21 @@ class _PreviewPageState extends State<PreviewPage> {
     if (_view == 'expanded') {
       return SingleChildScrollView(
         padding: const EdgeInsets.all(16),
-        child: PreviewExpandedBlock(
-          block: block,
-          exportMode: _exportMode,
-          lessonId: _lessonId,
-          highlightedStepId: _highlightedStepId,
-          blockLabels: _blockLabels,
-          onRefTapped: _reportRef,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (final shown in _blocks) ...[
+              if (shown != _blocks.first) const SizedBox(height: 16),
+              PreviewExpandedBlock(
+                block: shown,
+                exportMode: _exportMode,
+                lessonId: _lessonId,
+                highlightedStepId: _highlightedStepId,
+                blockLabels: _blockLabels,
+                onRefTapped: _reportRef,
+              ),
+            ],
+          ],
         ),
       );
     }

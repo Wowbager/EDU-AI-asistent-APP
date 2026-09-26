@@ -78,6 +78,29 @@ void main() {
         reason: 'inspect reports; it is not a move');
   });
 
+  testWidgets('Náhled: a card made of several blocks shows them all, in order', (tester) async {
+    final channel = await open(tester);
+    channel.post({
+      'type': 'setBlock',
+      'block': [
+        _block('B1', ['První']),
+        {..._block('B1_2', ['Druhý']), 'steps': [
+          {'id': 's2', 'type': 'text', 'order': 1, 'content': 'Druhý'},
+        ]},
+      ],
+      'exportMode': 'course_v2',
+      'view': 'expanded',
+      'stepId': 's2',
+    });
+    await tester.pumpAndSettle();
+    expect(find.textContaining('První'), findsOneWidget);
+    expect(find.textContaining('Druhý'), findsOneWidget);
+    final reply = await inspect(tester, channel, 5);
+    expect(reply['blockIds'], ['B1', 'B1_2']);
+    expect(reply['shownStepIds'], ['s1', 's2']);
+    expect(reply['stepId'], 's2');
+  });
+
   testWidgets('Vyzkoušet: where the pupil is, as stepChanged said', (tester) async {
     final channel = await open(tester);
     channel.post({

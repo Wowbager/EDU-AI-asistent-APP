@@ -84,7 +84,7 @@ player → editor   ready
                   completed {xp, scoreKoef, mark?}
                   navState {canGoBack}
                   inspected {id?, view, content, error?, lessonId?, blockId?,
-                             stepId?, shownStepIds, canGoBack}
+                             blockIds?, stepId?, shownStepIds, canGoBack}
 ```
 
 When each is sent — which is what the editor actually depends on:
@@ -104,11 +104,16 @@ already holds and changes none of it:
 
 - `content` is `none` (the placeholder), `block`, `lesson` or `error` (a draft that
   did not parse; `error` says why).
-- `blockId`, `stepId` and `shownStepIds`: in Náhled, the card, the step the editor has
-  focused and every step. While playing, the last `stepChanged`.
+- `blockId`, `stepId` and `shownStepIds`: in Náhled, the first block, the step the
+  editor has focused and every step of every block (`blockIds` lists the blocks).
+  While playing, the last `stepChanged`.
 - `canGoBack`: as in the last `navState`.
 
-`view` is `expanded` or `play`. `blockLabels` maps a `block_id` to what the branch
+`view` is `expanded` or `play`. `setBlock`'s `block` is a list: the blocks one
+teacher's card is made of, in order. The editor gives every question its own block,
+because the app grades a block as one item, and shows the blocks of one card to the
+teacher as that card. Náhled draws them one under another, as a pupil meets them; their
+step ids are unique across the card, so `stepId` outlines one step. `blockLabels` maps a `block_id` to what the branch
 markers should call it — the player holds one card and cannot look another one up, and
 must never print an id, because a teacher is not allowed to see one (plan §8).
 
