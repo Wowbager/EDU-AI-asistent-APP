@@ -810,6 +810,13 @@ class AppStrings {
   static String get engineEnterAnswer => _t('engineEnterAnswer');
   static String get engineTryAgain => _t('engineTryAgain');
 
+  // ── Widgets: Block Action Buttons (screen-reader labels) ──
+  static String get actionBookmark => _t('actionBookmark');
+  static String get actionLike => _t('actionLike');
+  static String get actionDislike => _t('actionDislike');
+  static String get actionHint => _t('actionHint');
+  static String get actionDone => _t('actionDone');
+
   // ── Widgets: Stat Card ──
   static String get statStreak => _t('statStreak');
   static String get statDays => _t('statDays');
@@ -1442,6 +1449,11 @@ class AppStrings {
     'engineSelectAnswer': 'Nejprve vyber odpověď',
     'engineEnterAnswer': 'Nejprve napiš odpověď',
     'engineTryAgain': 'Zkusit znovu',
+    'actionBookmark': 'Uložit do záložek',
+    'actionLike': 'Líbí se mi',
+    'actionDislike': 'Nelíbí se mi',
+    'actionHint': 'Nápověda',
+    'actionDone': 'Hotovo',
     'statStreak': 'Streak',
     'statDays': 'dní',
     'statTrophies': 'Trofeje',
@@ -2025,6 +2037,11 @@ class AppStrings {
     'engineSelectAnswer': 'Pick an answer first',
     'engineEnterAnswer': 'Type an answer first',
     'engineTryAgain': 'Try again',
+    'actionBookmark': 'Bookmark',
+    'actionLike': 'Like',
+    'actionDislike': 'Dislike',
+    'actionHint': 'Hint',
+    'actionDone': 'Done',
     'statStreak': 'Streak',
     'statDays': 'days',
     'statTrophies': 'Trophies',

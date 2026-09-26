@@ -8,6 +8,8 @@
 // API or report analytics can refuse at the point of effect.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:flutter/semantics.dart';
 
 import '../core/theme/app_colors.dart';
 import '../models/block_model.dart';
@@ -21,7 +23,10 @@ import 'preview_mode.dart';
 import 'preview_ref.dart';
 
 class PreviewPage extends StatefulWidget {
-  const PreviewPage({super.key});
+  /// The channel to the editor. Null is the platform's own; tests pass a fake.
+  final PreviewChannel? channel;
+
+  const PreviewPage({super.key, this.channel});
 
   @override
   State<PreviewPage> createState() => _PreviewPageState();
@@ -29,6 +34,9 @@ class PreviewPage extends StatefulWidget {
 
 class _PreviewPageState extends State<PreviewPage> {
   late final PreviewChannel _channel;
+
+  /// Keeps Flutter's semantics tree on for as long as the preview is open.
+  SemanticsHandle? _semantics;
 
   ContentBlock? _block;
   Map<String, dynamic>? _course;
@@ -59,10 +67,15 @@ class _PreviewPageState extends State<PreviewPage> {
   List<String> _stepIds = const [];
   String? _restoreStepId;
 
+  /// Where a played card or lesson last said the pupil is — the same thing that
+  /// went up as `stepChanged` — kept for `inspect`.
+  ({String blockId, String stepId, List<String> shownStepIds})? _position;
+
   @override
   void initState() {
     super.initState();
-    _channel = createPreviewChannel();
+    _semantics = SemanticsBinding.instance.ensureSemantics();
+    _channel = widget.channel ?? createPreviewChannel();
     _channel.listen(_onEditorMessage);
     _channel.send({'type': 'ready'});
   }
@@ -70,6 +83,7 @@ class _PreviewPageState extends State<PreviewPage> {
   @override
   void dispose() {
     _channel.dispose();
+    _semantics?.dispose();
     super.dispose();
   }
 
@@ -88,10 +102,13 @@ class _PreviewPageState extends State<PreviewPage> {
             _restoreStepId = null;
             _highlightedStepId = null;
             _error = null;
+            _position = null;
           });
           _playerKey.currentState?.restart();
         case 'back':
           _playerKey.currentState?.back();
+        case 'inspect':
+          _inspect(message['id']);
         case 'highlight':
           // In the expanded view every step is on screen, so a highlight has
           // somewhere to land: it outlines the step the editor is working on. A
@@ -121,6 +138,9 @@ class _PreviewPageState extends State<PreviewPage> {
 
     setState(() {
       _error = null;
+      if (remount || _view != ((message['view'] as String?) ?? 'expanded')) {
+        _position = null;
+      }
       _block = block;
       _course = null;
       _lessonId = null;
@@ -156,6 +176,7 @@ class _PreviewPageState extends State<PreviewPage> {
       _blockLabels = const {};
       _stepIds = const [];
       _restoreStepId = null;
+      _position = null;
       _mountGeneration++;
     });
   }
@@ -177,6 +198,40 @@ class _PreviewPageState extends State<PreviewPage> {
       default:
         return ExportMode.courseV2;
     }
+  }
+
+  /// Answers `inspect` with what is on screen, once the frame that draws it has
+  /// been painted — so a reply means the last message the editor sent is showing.
+  ///
+  /// The editor's tests use it to wait for the player instead of sleeping. It
+  /// reports state this page already holds and changes none of it.
+  void _inspect(Object? id) {
+    SchedulerBinding.instance.endOfFrame.then((_) {
+      if (!mounted) return;
+      final block = _block;
+      final lesson = _course != null && _lessonId != null;
+      final position = _position;
+      _channel.send({
+        'type': 'inspected',
+        if (id != null) 'id': id,
+        'view': _view,
+        'content': _error != null
+            ? 'error'
+            : lesson
+                ? 'lesson'
+                : block != null
+                    ? 'block'
+                    : 'none',
+        if (_error != null) 'error': _error,
+        if (lesson) 'lessonId': _lessonId,
+        'blockId': position?.blockId ?? block?.blockId,
+        'stepId': _view == 'expanded' ? _highlightedStepId : position?.stepId,
+        'shownStepIds': _view == 'expanded'
+            ? _stepIds
+            : (position?.shownStepIds ?? const <String>[]),
+        'canGoBack': _playerKey.currentState?.canGoBack ?? false,
+      });
+    });
   }
 
   void _reportRef(PreviewRef ref) {
@@ -258,11 +313,13 @@ class _PreviewPageState extends State<PreviewPage> {
         onStepShown: (index, onScreen) {
           final stepId = _stepIdAt(block, index);
           if (stepId.isEmpty) return;
+          final shown = [for (final i in onScreen) _stepIdAt(block, i)];
+          _position = (blockId: block.blockId, stepId: stepId, shownStepIds: shown);
           _channel.send({
             'type': 'stepChanged',
             'blockId': block.blockId,
             'stepId': stepId,
-            'shownStepIds': [for (final i in onScreen) _stepIdAt(block, i)],
+            'shownStepIds': shown,
           });
         },
         onCrossBlockNavigate: (blockId) {
@@ -312,12 +369,15 @@ class _PreviewPageState extends State<PreviewPage> {
       lessonId: lessonId,
       startBlockId: _startBlockId,
       onRefTapped: _reportRef,
-      onStepChanged: (blockId, stepId, shownStepIds) => _channel.send({
-        'type': 'stepChanged',
-        'blockId': blockId,
-        'stepId': stepId,
-        'shownStepIds': shownStepIds,
-      }),
+      onStepChanged: (blockId, stepId, shownStepIds) {
+        _position = (blockId: blockId, stepId: stepId, shownStepIds: shownStepIds);
+        _channel.send({
+          'type': 'stepChanged',
+          'blockId': blockId,
+          'stepId': stepId,
+          'shownStepIds': shownStepIds,
+        });
+      },
       onCompleted: ({required int xp, required double scoreKoef, String? mark}) {
         _channel.send({
           'type': 'completed',

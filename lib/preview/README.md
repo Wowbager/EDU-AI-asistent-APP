@@ -31,7 +31,12 @@ Four files outside this folder change:
 - `widgets/block_action_buttons.dart` — the block's action bar and main button,
   extracted from `BlockStepEngine` so that both the engine and Náhled draw the same
   ones. The engine kept the decisions (which label, enabled, complete); the new file
-  only paints. A student's session is unchanged.
+  only paints. A student's session is unchanged, except that its icons now have
+  names for a screen reader: "Uložit do záložek", "Líbí se mi", "Nelíbí se mi",
+  "Nápověda", and "Hotovo" or "Pokračovat" on the round button (strings in
+  `core/strings/app_strings.dart`, `action*`). The editor's browser tests find the
+  buttons by these names. **When upstream is merged**, its inline versions of these
+  buttons need the same `semanticLabel`s, or those tests lose the "?" and the check.
 
 ## Fixes to the app
 
@@ -68,6 +73,7 @@ Files: `models/block_model.dart`, `models/step_navigation.dart`,
 editor → player   setBlock {block, exportMode, view, stepId?, remount?, blockLabels?}
                   setLesson {course, lessonId, exportMode, view, startBlockId?}
                   highlight {ref}
+                  inspect {id?}
                   back
                   restart
                   reset
@@ -77,6 +83,8 @@ player → editor   ready
                   clicked {ref}
                   completed {xp, scoreKoef, mark?}
                   navState {canGoBack}
+                  inspected {id?, view, content, error?, lessonId?, blockId?,
+                             stepId?, shownStepIds, canGoBack}
 ```
 
 When each is sent — which is what the editor actually depends on:
@@ -88,6 +96,17 @@ When each is sent — which is what the editor actually depends on:
 | `clicked` | Náhled only: the author tapped something with an authored field behind it. Also sent by a played `go_to` whose target card is not in the lesson. |
 | `completed` | Playing: a card was finished. |
 | `navState` | Playing: whether `back` has somewhere to go changed. |
+| `inspected` | In answer to `inspect`, once the next frame has been painted. So a reply means everything the editor sent before it is on screen. |
+
+`inspect` is for the editor's tests. They wait on its reply instead of sleeping, and
+never have to guess from pixels what the player is showing. It reports state the page
+already holds and changes none of it:
+
+- `content` is `none` (the placeholder), `block`, `lesson` or `error` (a draft that
+  did not parse; `error` says why).
+- `blockId`, `stepId` and `shownStepIds`: in Náhled, the card, the step the editor has
+  focused and every step. While playing, the last `stepChanged`.
+- `canGoBack`: as in the last `navState`.
 
 `view` is `expanded` or `play`. `blockLabels` maps a `block_id` to what the branch
 markers should call it — the player holds one card and cannot look another one up, and
@@ -95,6 +114,18 @@ must never print an id, because a teacher is not allowed to see one (plan §8).
 
 Messages are JSON strings, and only from the same origin — the player is served under
 `/player/` on the editor's own host.
+
+## The accessibility layer is always on
+
+`PreviewPage` holds `SemanticsBinding.instance.ensureSemantics()` for as long as it is
+open. On the web that puts Flutter's semantics tree in the page as an invisible layer
+of elements with roles and names. The answer options, the markers, the feedback and
+the card's buttons can then be found by name, from a screen reader or from the editor's
+Playwright tests (`frameLocator('iframe').getByRole('button', {name: …})`). The tests
+click with the real mouse at the element's box, so a click still goes through
+Flutter's own hit-testing. Nothing is painted or laid out differently. The cost is the
+work of keeping the tree up to date while the preview runs. The student's app does
+not turn it on; it is still off there until a screen reader asks for it.
 
 ## Why nothing is written
 

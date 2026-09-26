@@ -1,7 +1,7 @@
 // The message channel between the editor and the embedded player.
 //
-//   editor → player: setBlock, setLesson, highlight, back, restart, reset
-//   player → editor: ready, stepChanged, clicked, completed, navState
+//   editor → player: setBlock, setLesson, highlight, back, restart, reset, inspect
+//   player → editor: ready, stepChanged, clicked, completed, navState, inspected
 //
 // What each carries, and *when* each is sent, is in `README.md` → "The contract".
 // The when matters as much as the what: the editor follows a run from

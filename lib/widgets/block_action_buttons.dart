@@ -16,12 +16,17 @@
 
 import 'package:flutter/material.dart';
 
+import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
 import '../models/step_navigation.dart';
 
 /// One icon in the left-hand bubble.
 class BlockActionButton extends StatelessWidget {
   final IconData icon;
+
+  /// What a screen reader says for the icon, and what the editor's tests find it
+  /// by. It draws nothing.
+  final String semanticLabel;
   final bool isActive;
   final Color? activeColor;
   final VoidCallback? onTap;
@@ -29,6 +34,7 @@ class BlockActionButton extends StatelessWidget {
   const BlockActionButton({
     super.key,
     required this.icon,
+    required this.semanticLabel,
     this.isActive = false,
     this.activeColor,
     this.onTap,
@@ -43,6 +49,7 @@ class BlockActionButton extends StatelessWidget {
         padding: const EdgeInsets.all(10),
         child: Icon(
           icon,
+          semanticLabel: semanticLabel,
           size: 22,
           color: isActive
               ? (activeColor ?? AppColors.quizPurple)
@@ -98,17 +105,20 @@ class BlockActionBar extends StatelessWidget {
       if (!isQuiz) ...[
         BlockActionButton(
           icon: isBookmarked ? Icons.bookmark : Icons.bookmark_border,
+          semanticLabel: AppStrings.actionBookmark,
           isActive: isBookmarked,
           onTap: onBookmark,
         ),
         BlockActionButton(
           icon: Icons.thumb_up_outlined,
+          semanticLabel: AppStrings.actionLike,
           isActive: isLiked,
           activeColor: AppColors.success,
           onTap: onLike,
         ),
         BlockActionButton(
           icon: Icons.thumb_down_outlined,
+          semanticLabel: AppStrings.actionDislike,
           isActive: isDisliked,
           activeColor: AppColors.orange,
           onTap: onDislike,
@@ -117,6 +127,7 @@ class BlockActionBar extends StatelessWidget {
       if (showHint)
         BlockActionButton(
           icon: Icons.help_outline,
+          semanticLabel: AppStrings.actionHint,
           isActive: false,
           onTap: onHint,
         ),
@@ -178,7 +189,12 @@ class BlockMainButton extends StatelessWidget {
             shape: BoxShape.circle,
             boxShadow: AppDecorations.shadowStrong,
           ),
-          child: const Icon(Icons.check, color: Colors.white, size: 24),
+          child: Icon(
+            Icons.check,
+            semanticLabel: AppStrings.actionDone,
+            color: Colors.white,
+            size: 24,
+          ),
         ),
       );
     }
@@ -237,6 +253,7 @@ class BlockMainButton extends StatelessWidget {
         ),
         child: Icon(
           Icons.check,
+          semanticLabel: AppStrings.engineContinue,
           color: enabled ? AppColors.primaryDark : AppColors.disabled,
           size: 24,
         ),
