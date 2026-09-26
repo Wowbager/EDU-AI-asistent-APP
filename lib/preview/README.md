@@ -199,7 +199,7 @@ Run, on Flutter 3.47.4 / Dart 3.13.3 (the SDK lives at `~/sdk/flutter`; add
   suite is the guard on
   the button extraction: it pumps a real `BlockStepEngine` and asserts on the labels,
   so it fails if moving the drawing out changed what a student sees.
-- `flutter build web --release --base-href /player/` — builds.
+- `flutter build web --release --base-href /player/ --no-web-resources-cdn` — builds.
 
 Two things about running `flutter test` on the **whole** suite here, neither caused by
 this folder:
