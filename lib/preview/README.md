@@ -219,28 +219,18 @@ narrower than in the app. The pointer cursor is the only sign now.
 
 ## Acceptance
 
-Run, on Flutter 3.47.4 / Dart 3.13.3 (the SDK lives at `~/sdk/flutter`; add
-`~/sdk/flutter/bin` to `PATH`):
+Run, on Flutter 3.47.4 / Dart 3.13.3 or newer (`pubspec.yaml` needs Dart 3.10):
 
 - `flutter analyze lib/preview lib/widgets/block_action_buttons.dart lib/widgets/block_step_engine.dart test/preview` — clean.
 - `flutter test test/preview test/widgets` — passes. `block_step_engine_reveal_test.dart`
-  holds the three fixes to the app. `preview_fidelity_test.dart` holds
+  holds the three fixes to the app. `preview_page_test.dart` holds `inspect` and the
+  names of the card's buttons. `preview_fidelity_test.dart` holds
   the layout invariance (focus changes no line break), the parity with the app (a
   target changes no line break), and every `stepChanged` emission point. The widget
   suite is the guard on
   the button extraction: it pumps a real `BlockStepEngine` and asserts on the labels,
   so it fails if moving the drawing out changed what a student sees.
 - `flutter build web --release --base-href /player/ --no-web-resources-cdn` — builds.
-
-Two things about running `flutter test` on the **whole** suite here, neither caused by
-this folder:
-
-- The Drift-backed tests need `libsqlite3.so`, and Debian ships only the versioned
-  `libsqlite3.so.0` unless `libsqlite3-dev` is installed. Either install it, or point
-  `LD_LIBRARY_PATH` at a directory holding a `libsqlite3.so` symlink to it.
-- `test/widget_test.dart` is the untouched `flutter create` scaffold: it pumps `MyApp`
-  with no `ProviderScope` and looks for a counter this app does not have. It has always
-  failed. Delete it or write it; do not read it as a regression.
 - `/preview` opened directly renders the placeholder, accepts a `setBlock` posted from
   the console, renders the block with its Markdown and LaTeX intact, and answers.
 - A click on the rendered text posts
@@ -265,6 +255,15 @@ window.postMessage(JSON.stringify({
 
 It renders, answers, and writes nothing to Drift or the API. A click on the text posts
 `clicked` back with `{blockId: 'T1', stepId: 's1', field: 'content'}`.
+
+Two things about running `flutter test` on the **whole** suite, neither caused by this
+folder:
+
+- The Drift-backed tests need an unversioned `libsqlite3.so` on the library path (on
+  Linux, from the `libsqlite3-dev` package).
+- `test/widget_test.dart` is the untouched `flutter create` scaffold: it pumps `MyApp`
+  with no `ProviderScope` and looks for a counter this app does not have. It has always
+  failed. Delete it or write it; do not read it as a regression.
 
 Note that messages are **JSON strings**, not structured objects — see
 `preview_channel_web.dart`. One encoding in both directions is what keeps the channel
