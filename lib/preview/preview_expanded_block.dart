@@ -291,17 +291,26 @@ class _StepCard extends StatelessWidget {
 
     final ownHint = _text(step.hint);
     final ownHelp = _text(step.help);
+    final fallback = _firstStepFallingBack();
     if (!_stepIsEverCurrent) {
       if (ownHint.isNotEmpty) markers.add(marker(field: 'hint', own: true, text: ownHint, unseen: true));
       if (ownHelp.isNotEmpty) markers.add(marker(field: 'help', own: true, text: ownHelp, unseen: true));
+      // The finished bubble's "?" (see [_firstStepFallingBack]).
+      final cardHint = _text(block.atomicHint);
+      final cardHelp = _text(block.atomicHelp);
+      if (fallback.hint == step.stepId && cardHint.isNotEmpty) {
+        markers.add(marker(field: 'hint', own: false, text: cardHint));
+      }
+      if (fallback.help == step.stepId && cardHelp.isNotEmpty) {
+        markers.add(marker(field: 'help', own: false, text: cardHelp, unseen: cardHint.isEmpty));
+      }
     } else {
-      final firstFallback = _firstStepFallingBack();
       final hintOwn = ownHint.isNotEmpty;
       final helpOwn = ownHelp.isNotEmpty;
-      if (hintOwn || firstFallback.hint == step.stepId) {
+      if (hintOwn || fallback.hint == step.stepId) {
         if (_hint.isNotEmpty) markers.add(marker(field: 'hint', own: hintOwn, text: _hint));
       }
-      if (helpOwn || firstFallback.help == step.stepId) {
+      if (helpOwn || fallback.help == step.stepId) {
         // Help is only ever reached from an open hint.
         if (_help.isNotEmpty) {
           markers.add(marker(field: 'help', own: helpOwn, text: _help, unseen: _hint.isEmpty));
@@ -314,6 +323,11 @@ class _StepCard extends StatelessWidget {
 
   /// The first step that would show the card's hint, and the first that would
   /// show its help, because it has none of its own.
+  ///
+  /// A question card that ends in text also offers the card's own on the finished
+  /// bubble: the engine walks past the last step on the way out, and with no step
+  /// current `currentHint` is the card's. Its markers then go on the last step,
+  /// which is where that bubble ends.
   ({String? hint, String? help}) _firstStepFallingBack() {
     String? hint;
     String? help;
@@ -322,6 +336,11 @@ class _StepCard extends StatelessWidget {
       if (oneCard && !candidate.isEvaluationStep) continue;
       hint ??= _text(candidate.hint).isEmpty ? candidate.stepId : null;
       help ??= _text(candidate.help).isEmpty ? candidate.stepId : null;
+    }
+    final last = block.steps.isEmpty ? null : block.steps.last;
+    if (oneCard && last != null && !last.isEvaluationStep) {
+      hint ??= last.stepId;
+      help ??= last.stepId;
     }
     return (hint: hint, help: help);
   }

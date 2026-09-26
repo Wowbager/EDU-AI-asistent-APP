@@ -167,6 +167,42 @@ void main() {
     expect(find.textContaining('(žák ji neuvidí): Neviditelná'), findsOneWidget);
   });
 
+  testWidgets('a question card that ends in text shows the card\'s hint where its bubble ends', (tester) async {
+    final refs = <PreviewRef>[];
+    await tester.pumpWidget(_sized(PreviewExpandedBlock(
+      block: ContentBlock.fromJson({
+        'block_id': 'B1',
+        'type': 'question',
+        'hint': 'Ke kartě',
+        'steps': [
+          {
+            'id': 's1',
+            'type': 'question',
+            'order': 1,
+            'content': 'Otázka',
+            'hint': 'K otázce',
+            'question': {
+              'type': 'multiple_choice',
+              'options': [
+                {'id': 'a', 'text': 'Ano', 'is_correct': true},
+              ],
+            },
+          },
+          {'id': 's2', 'type': 'text', 'order': 2, 'content': 'Shrnutí'},
+        ],
+      }),
+      onRefTapped: refs.add,
+    )));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.help_outline), findsOneWidget, reason: 'the question\'s own');
+    expect(find.textContaining('Nápověda: Ke kartě'), findsOneWidget);
+    await tester.ensureVisible(find.textContaining('Nápověda: Ke kartě'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.textContaining('Nápověda: Ke kartě'));
+    expect(refs.single.stepId, isNull);
+    expect(refs.single.field, 'hint');
+  });
+
   group('Vyzkoušet', () {
     Future<List<String>> run(
       WidgetTester tester, {
