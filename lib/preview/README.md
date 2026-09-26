@@ -1,7 +1,9 @@
 # Preview mode
 
-The surface the course editor embeds. Small and additive: nothing in the student's
-app changes, and nothing here runs unless someone opens `/preview`.
+The surface the course editor embeds. Small and additive: nothing here runs unless
+someone opens `/preview`. The fork also carries **three fixes to the student's app
+itself**, listed under "Fixes to the app" below, until the upstream release that
+fixes them lands.
 
 ## What it adds
 
@@ -21,13 +23,44 @@ Four files outside this folder change:
 - `widgets/step_content_renderer.dart` — passive leaves are wrapped in
   `PreviewTarget`. Outside preview mode `PreviewTarget` returns its child and
   nothing else, so a student's session gains no widget and no rebuild.
-- `widgets/block_step_engine.dart` — an optional `onStepShown(stepIndex)`, fired
-  after the frame whenever the step on screen changes, from the one setter every
-  write to `_currentStepIndex` goes through. It is null in the student's app.
+- `widgets/block_step_engine.dart` — an optional `onStepShown(stepIndex, onScreen)`,
+  fired after the frame whenever the step on screen changes, from the one setter
+  every write to `_currentStepIndex` goes through. `onScreen` is every step the card
+  is drawing. It is null in the student's app, except in `quiz_page`, which uses it
+  to rebuild its bottom bar's "?".
 - `widgets/block_action_buttons.dart` — the block's action bar and main button,
   extracted from `BlockStepEngine` so that both the engine and Náhled draw the same
   ones. The engine kept the decisions (which label, enabled, complete); the new file
   only paints. A student's session is unchanged.
+
+## Fixes to the app
+
+The upstream code on GitHub is older than the app in production. Three of its bugs
+made the preview show a card differently from how a student gets it, so they are
+fixed here, in the app's own code, until the newer upstream arrives. When it does,
+merge it, keep whichever version of each fix upstream has, and rerun
+`test/widgets/block_step_engine_reveal_test.dart`: it states what a student must see.
+
+1. **The hint is the step on screen's.** `ContentBlock.currentHint`/`currentHelp`
+   read `steps[currentStepIndex]`, and nothing moved that index, so every step of a
+   card offered the first step's hint (or the card's). The engine's index setter now
+   keeps `block.currentStepIndex` on the step it shows. The engine decides whether
+   to draw the "?", so owners always wire `onHintRequested`; the `hasHint`
+   parameter is gone. An empty step hint no longer hides the card's. The "?" is on
+   the current step only, not on the history cards above it.
+2. **A question or exercise card reveals its questions as they come.** The bubble
+   drew every step from the start. A question below the current one looked
+   answerable and ignored every tap. Now a question appears when it is the one to
+   answer, with the text before it, and the answered ones stay above. A missing
+   typed answer says "Nejprve napiš odpověď", not "Nejprve vyber odpověď".
+3. **A skipped step is not history.** The history was "every step before the
+   current one", so a `go_to` over a step drew it anyway. The engine records the
+   visited steps (`StepProgressData.visitedSteps`, optional in saved progress, so
+   older saves restore as before).
+
+Files: `models/block_model.dart`, `models/step_navigation.dart`,
+`widgets/block_step_engine.dart`, `pages/lesson_detail_page.dart`,
+`pages/quiz_page.dart`, `core/strings/app_strings.dart`.
 
 ## The contract
 
@@ -40,7 +73,7 @@ editor → player   setBlock {block, exportMode, view, stepId?, remount?, blockL
                   reset
 
 player → editor   ready
-                  stepChanged {stepId, blockId}
+                  stepChanged {stepId, blockId, shownStepIds}
                   clicked {ref}
                   completed {xp, scoreKoef, mark?}
                   navState {canGoBack}
@@ -51,7 +84,7 @@ When each is sent — which is what the editor actually depends on:
 | Message | Sent when |
 |---|---|
 | `ready` | The page has mounted and is listening. Again if the frame reloads. |
-| `stepChanged` | Only while playing, **every time the step on screen changes**: the first card mounting, a move within a card, the next card, a `go_to` into another card, `back`, `restart`, the current card losing the step it was on. Once per change; a rebuild that moves nothing sends nothing. Never from Náhled. |
+| `stepChanged` | Only while playing, **every time the step on screen changes**: the first card mounting, a move within a card, the next card, a `go_to` into another card, `back`, `restart`, the current card losing the step it was on. Once per change; a rebuild that moves nothing sends nothing. Never from Náhled. `shownStepIds` is every step of that card on the pupil's screen, in order; the editor folds the others. |
 | `clicked` | Náhled only: the author tapped something with an authored field behind it. Also sent by a played `go_to` whose target card is not in the lesson. |
 | `completed` | Playing: a card was finished. |
 | `navState` | Playing: whether `back` has somewhere to go changed. |
@@ -99,11 +132,12 @@ The row is drawn in its **completed** state — the green check, not a greyed
 "Zkontrolovat". The engine's own name for a step rendered with its answer and solution
 showing is a *history* step, and this is the row it pairs with one.
 
-The question mark is gated the way **the app** gates it: on `block.hasHint`, which is
-the first step's hint or the card's, on every step of the card — `lesson_detail_page`
-never moves the block's `currentStepIndex` off 0. An earlier version gated it per step
-and so promised hints the app never shows. A later step's own hint or help is still
-drawn as a marker, labelled "žák ji neuvidí", and so is help with no hint to open it.
+The question mark follows the app's rule (fix 1 above): each step offers its own
+hint, or the card's. A question or exercise card only ever stops on its questions,
+so the text steps between them offer none. Their own hint or help is drawn as a
+marker labelled "žák ji neuvidí", and so is help with no hint to open it. A step's
+own hint and help are drawn on it; the card's are drawn once, on the first step
+that uses them.
 
 The outline around the step the editor has focused is a `foregroundDecoration`: it is
 painted over the card and takes no part in layout. It used to widen the border, which
@@ -113,7 +147,10 @@ made the focused step narrower and re-wrapped its text
 **Vyzkoušet** (`PreviewLessonPlayer`) mirrors `lesson_detail_page`: a growing list,
 one `isCurrent` block, auto-advance and scroll on completion. Cross-block `go_to`
 actually jumps, so branching is testable. The question mark opens the app's own hint
-sheet (`preview_hint.dart`), with nothing recorded.
+sheet (`preview_hint.dart`), with nothing recorded. A finished card keeps the engine
+it was played in, so it keeps its answers and shows only the steps that were
+visited, as the app's list does. It used to be re-created as "completed", which
+forgot both.
 
 No `PreviewTarget` is live here — `interactive: true` switches them off — so a tap on
 text or a picture does what it does for a pupil, and nothing marks which step is
@@ -154,7 +191,8 @@ Run, on Flutter 3.47.4 / Dart 3.13.3 (the SDK lives at `~/sdk/flutter`; add
 `~/sdk/flutter/bin` to `PATH`):
 
 - `flutter analyze lib/preview lib/widgets/block_action_buttons.dart lib/widgets/block_step_engine.dart test/preview` — clean.
-- `flutter test test/preview test/widgets` — passes. `preview_fidelity_test.dart` holds
+- `flutter test test/preview test/widgets` — passes. `block_step_engine_reveal_test.dart`
+  holds the three fixes to the app. `preview_fidelity_test.dart` holds
   the layout invariance (focus changes no line break), the parity with the app (a
   target changes no line break), and every `stepChanged` emission point. The widget
   suite is the guard on

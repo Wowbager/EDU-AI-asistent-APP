@@ -807,6 +807,7 @@ class AppStrings {
   static String get engineNext => _t('engineNext');
   static String get engineContinue => _t('engineContinue');
   static String get engineSelectAnswer => _t('engineSelectAnswer');
+  static String get engineEnterAnswer => _t('engineEnterAnswer');
   static String get engineTryAgain => _t('engineTryAgain');
 
   // ── Widgets: Stat Card ──
@@ -1439,6 +1440,7 @@ class AppStrings {
     'engineNext': 'Další',
     'engineContinue': 'Pokračovat',
     'engineSelectAnswer': 'Nejprve vyber odpověď',
+    'engineEnterAnswer': 'Nejprve napiš odpověď',
     'engineTryAgain': 'Zkusit znovu',
     'statStreak': 'Streak',
     'statDays': 'dní',
@@ -2021,6 +2023,7 @@ class AppStrings {
     'engineNext': 'Next',
     'engineContinue': 'Continue',
     'engineSelectAnswer': 'Pick an answer first',
+    'engineEnterAnswer': 'Type an answer first',
     'engineTryAgain': 'Try again',
     'statStreak': 'Streak',
     'statDays': 'days',

@@ -1,5 +1,7 @@
 // The question mark in a played preview, wired the way `lesson_detail_page` wires
-// it: gated on `block.hasHint`, opening the app's own sheet.
+// it: always passed to the engine, which offers it when the step on screen has a
+// hint (`block.hasHint`, kept on that step by the engine), opening the app's own
+// sheet.
 //
 // Everything the sheet would record — the hint penalty, the practice bookmark, the
 // AI chat, feedback to the teacher — has nowhere to go in a preview, so it goes

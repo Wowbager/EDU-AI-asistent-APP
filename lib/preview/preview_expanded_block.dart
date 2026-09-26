@@ -186,18 +186,26 @@ class _StepCard extends StatelessWidget {
     );
   }
 
-  /// Whether the student's app draws the question mark, and so whether this does.
-  ///
-  /// This used to be decided per step — this step's hint or help, else the card's —
-  /// on the reasoning that every step is on screen at once here. It described a
-  /// rule the app does not have. `lesson_detail_page` passes `block.hasHint`, which
-  /// reads `ContentBlock.currentHint`, and nothing in a lesson ever moves the
-  /// block's `currentStepIndex` off 0: the question mark and the sheet behind it
-  /// are the *first* step's hint, or the card's, on every step of the card. Help
-  /// with no hint is never offered either — the sheet opens on the hint and only
-  /// then escalates. The preview says what the student gets; the editor warns
-  /// about the text that no student will reach (`W_HINT_UNREACHABLE`).
-  bool get _appShowsHint => block.hasHint;
+  /// Whether the app ever makes this step the current one, which is the step the
+  /// question mark reads (`ContentBlock.currentHint`, kept on the step on screen
+  /// by `BlockStepEngine`). A question or exercise card only stops on its
+  /// questions; the text between them is context and never current, so its own
+  /// hint and help are never offered.
+  bool get _stepIsEverCurrent =>
+      !(block.type == BlockType.exercise || block.type == BlockType.question) ||
+      step.isEvaluationStep;
+
+  static String _text(String? value) => (value ?? '').trim().isEmpty ? '' : value!;
+
+  /// What the question mark on this step opens: the step's own hint, else the
+  /// card's. The same rule as `ContentBlock.currentHint`.
+  String get _hint => _text(step.hint).isNotEmpty ? step.hint! : _text(block.atomicHint);
+  String get _help => _text(step.help).isNotEmpty ? step.help! : _text(block.atomicHelp);
+
+  /// Whether the student's app draws the question mark on this step, and so
+  /// whether this does. Help with no hint is never offered: the sheet opens on
+  /// the hint and only then escalates.
+  bool get _appShowsHint => _stepIsEverCurrent && _hint.isNotEmpty;
 
   /// The card's own controls, in the state this view renders its content in.
   Widget _bottomRow() {
@@ -222,16 +230,15 @@ class _StepCard extends StatelessWidget {
 
   PreviewRef _stepRef() => PreviewRef(blockId: block.blockId, stepId: step.stepId);
 
-  /// Where the text the question mark opens is actually written: the first
-  /// step's hint, or the card's (see [_appShowsHint]).
+  /// Where the text the question mark opens is actually written: this step's
+  /// hint, or the card's (see [_hint]).
   ///
   /// A block-level hint is sent **without** a `stepId`: the editor reads a ref
   /// carrying one as addressing the step, and would write the card's hint onto a
   /// step that never had one.
   PreviewRef _helpRef() {
-    final first = block.steps.isEmpty ? null : block.steps.first;
-    if (first != null && (first.hint ?? '').isNotEmpty) {
-      return PreviewRef(blockId: block.blockId, stepId: first.stepId, field: 'hint');
+    if (_text(step.hint).isNotEmpty) {
+      return PreviewRef(blockId: block.blockId, stepId: step.stepId, field: 'hint');
     }
     return PreviewRef(blockId: block.blockId, field: 'hint');
   }
@@ -258,14 +265,15 @@ class _StepCard extends StatelessWidget {
   /// and edit the text, so these markers are here to be *read*, and forty
   /// characters of a hint is not a hint.
   ///
-  /// The app shows one hint and one help for the whole card (see [_appShowsHint]),
-  /// so they are drawn once, on the first step, and each lands on the field it is
-  /// really written in — the card's own hint is addressed without a `stepId`, or a
-  /// click would write it onto the step. A later step's own hint or help is the
-  /// author's text that no student reaches, and is drawn as exactly that.
+  /// A step's own hint and help are drawn on it. The card's are drawn once, on
+  /// the first step that falls back to them. Drawing them on every step repeats
+  /// the same paragraph down the card; the "?" on the other steps still opens
+  /// them. Each marker lands on the field it is really written in: the card's
+  /// is addressed without a `stepId`, or a click would write it onto the step.
+  /// Text no student reaches is drawn as exactly that: help with no hint to open
+  /// it, and the hint and help of text that a question card never stops on.
   List<Widget> _helpMarkers() {
     final markers = <Widget>[];
-    final isFirst = block.steps.isNotEmpty && block.steps.first.stepId == step.stepId;
 
     Widget marker({required String field, required bool own, required String text, bool unseen = false}) {
       final label = field == 'hint' ? 'Nápověda' : 'Pomoc';
@@ -281,24 +289,41 @@ class _StepCard extends StatelessWidget {
       );
     }
 
-    final ownHint = step.hint ?? '';
-    final ownHelp = step.help ?? '';
-    if (isFirst) {
-      final hintOwn = ownHint.isNotEmpty;
-      final hint = hintOwn ? ownHint : (block.atomicHint ?? '');
-      final helpOwn = ownHelp.isNotEmpty;
-      final help = helpOwn ? ownHelp : (block.atomicHelp ?? '');
-      if (hint.isNotEmpty) markers.add(marker(field: 'hint', own: hintOwn, text: hint));
-      // Help is only ever reached from an open hint.
-      if (help.isNotEmpty) {
-        markers.add(marker(field: 'help', own: helpOwn, text: help, unseen: hint.isEmpty));
-      }
-    } else {
+    final ownHint = _text(step.hint);
+    final ownHelp = _text(step.help);
+    if (!_stepIsEverCurrent) {
       if (ownHint.isNotEmpty) markers.add(marker(field: 'hint', own: true, text: ownHint, unseen: true));
       if (ownHelp.isNotEmpty) markers.add(marker(field: 'help', own: true, text: ownHelp, unseen: true));
+    } else {
+      final firstFallback = _firstStepFallingBack();
+      final hintOwn = ownHint.isNotEmpty;
+      final helpOwn = ownHelp.isNotEmpty;
+      if (hintOwn || firstFallback.hint == step.stepId) {
+        if (_hint.isNotEmpty) markers.add(marker(field: 'hint', own: hintOwn, text: _hint));
+      }
+      if (helpOwn || firstFallback.help == step.stepId) {
+        // Help is only ever reached from an open hint.
+        if (_help.isNotEmpty) {
+          markers.add(marker(field: 'help', own: helpOwn, text: _help, unseen: _hint.isEmpty));
+        }
+      }
     }
     if (markers.isEmpty) return const [];
     return [const SizedBox(height: 10), ...markers];
+  }
+
+  /// The first step that would show the card's hint, and the first that would
+  /// show its help, because it has none of its own.
+  ({String? hint, String? help}) _firstStepFallingBack() {
+    String? hint;
+    String? help;
+    final oneCard = block.type == BlockType.exercise || block.type == BlockType.question;
+    for (final candidate in block.steps) {
+      if (oneCard && !candidate.isEvaluationStep) continue;
+      hint ??= _text(candidate.hint).isEmpty ? candidate.stepId : null;
+      help ??= _text(candidate.help).isEmpty ? candidate.stepId : null;
+    }
+    return (hint: hint, help: help);
   }
 
   String _describeTarget(String goTo) {

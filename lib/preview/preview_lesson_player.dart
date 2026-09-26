@@ -18,10 +18,17 @@
 //
 //  * **Where the run is.** Every time the step on screen changes — the first card
 //    mounting, the next card, a branch to another card, back, restart, a move
-//    within a card — `onStepChanged` reports `(blockId, stepId)`, once per change.
-//    It comes from the engine's `onStepShown`, which is fired from the one setter
-//    all of the engine's moves go through, rather than from a call at each place
-//    this file moves. The editor follows the run with it.
+//    within a card — `onStepChanged` reports `(blockId, stepId, shownStepIds)`,
+//    once per change: the current step, and every step of that card the pupil
+//    has on screen. It comes from the engine's `onStepShown`, which is fired from
+//    the one setter all of the engine's moves go through, rather than from a call
+//    at each place this file moves. The editor follows the run with it, and folds
+//    the steps the pupil has not reached.
+//  * **A finished card stays as it was left.** Each card keeps the engine it was
+//    played in until the run goes back past it, so the history above the current
+//    card shows the answers given and only the steps that were visited, as the
+//    app's list does. It used to be re-created as "completed", which forgot both
+//    and drew every step of it.
 //  * **Positions are card ids, not indices.** The author edits while the run is
 //    open: cards are reordered and deleted under it. An index into `blocks` then
 //    points at a different card, so the history and the current card are kept by
@@ -46,7 +53,11 @@ class _Visit {
   final String blockId;
   final int stepIndex;
 
-  const _Visit(this.blockId, this.stepIndex);
+  /// The steps visited by then, so a back does not draw a skipped step as
+  /// history. Not part of equality: it is what the visit knew, not where it was.
+  final List<int>? visitedSteps;
+
+  const _Visit(this.blockId, this.stepIndex, [this.visitedSteps]);
 
   @override
   bool operator ==(Object other) =>
@@ -66,8 +77,9 @@ class PreviewLessonPlayer extends StatefulWidget {
 
   final void Function(PreviewRef ref) onRefTapped;
 
-  /// The step now on screen, whenever it changes. See the file comment.
-  final void Function(String blockId, String stepId) onStepChanged;
+  /// The step now on screen and the card's steps the pupil can see, whenever
+  /// either changes. See the file comment.
+  final void Function(String blockId, String stepId, List<String> shownStepIds) onStepChanged;
   final void Function({required int xp, required double scoreKoef, String? mark}) onCompleted;
 
   /// Reports whether there is anywhere to go back to, so the editor can enable or
@@ -109,10 +121,21 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
   int _generation = 0;
   StepProgressData? _restore;
 
+  /// The generation each card on screen was mounted in. A card keeps its key —
+  /// and so its engine, answers and visited steps — from the moment it becomes
+  /// current until it leaves the screen.
+  final Map<String, int> _mountedIn = {};
+
+  /// Make [blockId] the current card in a fresh engine.
+  void _mount(String blockId) {
+    _generation++;
+    _mountedIn[blockId] = _generation;
+  }
+
   /// The step the current card's engine last showed, and the last position sent
   /// to the editor — so a rebuild that changes nothing sends nothing.
   int _shownStep = 0;
-  _Visit? _reported;
+  String? _reported;
 
   @override
   void initState() {
@@ -120,6 +143,7 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
     _firstId = _startId();
     _currentId = _firstId;
     _history.add(_Visit(_currentId, 0));
+    _mountedIn[_currentId] = _generation;
     WidgetsBinding.instance.addPostFrameCallback((_) => _reportNavState());
   }
 
@@ -162,7 +186,8 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
                   .clamp(0, block.steps.isEmpty ? 0 : block.steps.length - 1),
             )
           : _restore;
-      _generation++;
+      _mountedIn.removeWhere((id, _) => !ids.contains(id));
+      _mount(_currentId);
     });
     _reportNavState();
   }
@@ -193,13 +218,17 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
   void _reportNavState() => widget.onNavState(canGoBack);
 
   /// Tell the editor which step is on screen, unless it already knows.
-  void _reportPosition(String blockId, int stepIndex) {
+  void _reportPosition(String blockId, int stepIndex, List<int> onScreen) {
     final block = _blockById(blockId);
     if (block == null || stepIndex < 0 || stepIndex >= block.steps.length) return;
-    final visit = _Visit(blockId, stepIndex);
-    if (visit == _reported) return;
-    _reported = visit;
-    widget.onStepChanged(blockId, block.steps[stepIndex].stepId);
+    final shown = [
+      for (final i in onScreen)
+        if (i >= 0 && i < block.steps.length) block.steps[i].stepId,
+    ];
+    final report = '$blockId\u0000$stepIndex\u0000${shown.join('\u0000')}';
+    if (report == _reported) return;
+    _reported = report;
+    widget.onStepChanged(blockId, block.steps[stepIndex].stepId, shown);
   }
 
   /// Start the lesson again from the card the run started on.
@@ -212,7 +241,8 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
         ..add(_Visit(_currentId, 0));
       _restore = null;
       _reported = null;
-      _generation++;
+      _mountedIn.clear();
+      _mount(_currentId);
     });
     _reportNavState();
     _scrollToCurrent();
@@ -230,15 +260,24 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
     setState(() {
       _currentId = target.blockId;
       if (_indexOf(_firstId) > _indexOf(_currentId)) _firstId = _currentId;
-      _restore = StepProgressData(blockId: target.blockId, currentStepIndex: target.stepIndex);
-      _generation++;
+      _restore = StepProgressData(
+        blockId: target.blockId,
+        currentStepIndex: target.stepIndex,
+        visitedSteps: target.visitedSteps,
+      );
+      _mount(_currentId);
     });
     _reportNavState();
     _scrollToCurrent();
   }
 
   void _recordVisit(_Visit visit) {
-    if (_history.isNotEmpty && _history.last == visit) return;
+    if (_history.isNotEmpty && _history.last == visit) {
+      // The same place, with what it knows now (an answer can add nothing to
+      // the index and still be progress).
+      _history[_history.length - 1] = visit;
+      return;
+    }
     _history.add(visit);
     _reportNavState();
   }
@@ -249,7 +288,7 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
     setState(() {
       _currentId = widget.blocks[next].blockId;
       _restore = null;
-      _generation++;
+      _mount(_currentId);
     });
     _recordVisit(_Visit(_currentId, 0));
     _scrollToCurrent();
@@ -268,7 +307,7 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
       _currentId = blockId;
       if (_indexOf(_firstId) > _indexOf(_currentId)) _firstId = _currentId;
       _restore = null;
-      _generation++;
+      _mount(_currentId);
     });
     _recordVisit(_Visit(_currentId, 0));
     _scrollToCurrent();
@@ -318,29 +357,30 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
             onRefTapped: widget.onRefTapped,
           ),
           child: BlockStepEngine(
-            // The generation is in the key so that a back or a restart re-creates
-            // the engine; without it the engine keeps its own forward-only state.
-            key: ValueKey('${block.blockId}_${isCurrent ? _generation : 'done'}'),
+            // The generation the card was mounted in is in the key, so a back or a
+            // restart re-creates the engine (it has only forward-only state), and
+            // a card that is finished keeps the engine it was played in.
+            key: ValueKey('${block.blockId}_${_mountedIn[block.blockId] ?? -1}'),
             block: block,
             exportMode: widget.exportMode,
             isCurrent: isCurrent,
             isCompleted: !isCurrent,
-            hasHint: block.hasHint,
-            onHintRequested: block.hasHint ? () => showPreviewHint(context, block) : null,
+            onHintRequested: () => showPreviewHint(context, block),
             onBlockCompleted: ({int earnedXp = 0, double scoreKoef = 1.0, String? mark}) {
               widget.onCompleted(xp: earnedXp, scoreKoef: scoreKoef, mark: mark);
               _advance();
             },
             onStepProgress: (progress) {
               if (!isCurrent) return;
-              _recordVisit(_Visit(block.blockId, progress.currentStepIndex));
+              _recordVisit(_Visit(block.blockId, progress.currentStepIndex, progress.visitedSteps));
             },
-            onStepShown: isCurrent
-                ? (stepIndex) {
-                    _shownStep = stepIndex;
-                    _reportPosition(block.blockId, stepIndex);
-                  }
-                : null,
+            // Always wired, and filtered here: the engine is kept when its card
+            // stops being current, and would otherwise keep a stale callback.
+            onStepShown: (stepIndex, onScreen) {
+              if (block.blockId != _currentId) return;
+              _shownStep = stepIndex;
+              _reportPosition(block.blockId, stepIndex, onScreen);
+            },
             onCrossBlockNavigate: _jumpTo,
             onChatRequested: () {},
             savedProgress: isCurrent ? _restore : null,

@@ -1955,8 +1955,13 @@ class _QuizPageState extends ConsumerState<QuizPage> {
             });
           }
         },
-        hasHint: block.hasHint,
-        onHintRequested: block.hasHint ? () => _showHintBottomSheet(block) : null,
+        // Always wired: the engine offers the "?" for the step on screen, and the
+        // sheet reads that step's hint. The bottom bar's own "?" reads it too, so
+        // it is rebuilt whenever the engine moves to another step.
+        onHintRequested: () => _showHintBottomSheet(block),
+        onStepShown: (_, _) {
+          if (mounted) setState(() {});
+        },
         onChatRequested: widget.evaluate ? () => _openChatWithContext(_currentQuestionIndex) : null,
         onWrongAnswer: () => _autoBookmarkOnWrong(block),
       );

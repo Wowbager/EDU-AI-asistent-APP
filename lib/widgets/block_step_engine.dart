@@ -114,9 +114,10 @@ class BlockStepEngine extends StatefulWidget {
 
   /// Called with the index of the step now on screen whenever it changes,
   /// including the first one after mounting or restoring — which is what
-  /// [onStepProgress] does not cover. Reported after the frame, once per change.
-  /// Null in the student's app; the editor's preview follows the run with it.
-  final void Function(int stepIndex)? onStepShown;
+  /// [onStepProgress] does not cover — and with every step the card is drawing
+  /// at that moment, in order. Reported after the frame, once per change. Null in
+  /// the student's app; the editor's preview follows the run with it.
+  final void Function(int stepIndex, List<int> onScreen)? onStepShown;
 
   /// Optional controller for external answer confirmation (used by QuizPage).
   /// When provided, the engine hides its own bottom row and lets the parent
@@ -127,6 +128,12 @@ class BlockStepEngine extends StatefulWidget {
   final void Function()? onBookmarkToggle;
   final void Function()? onLikeToggle;
   final void Function()? onDislikeToggle;
+
+  /// Opens the hint for the step on screen. The engine decides whether to offer
+  /// it: the "?" is drawn when the current step has a hint, or the block does
+  /// ([ContentBlock.hasHint], which reads the step the engine keeps current).
+  /// The owner must not gate this on `block.hasHint` itself. It reads that once,
+  /// when it builds the engine, and so only ever sees the first step.
   final void Function()? onHintRequested;
 
   /// Called when the user answers a question incorrectly.
@@ -145,7 +152,6 @@ class BlockStepEngine extends StatefulWidget {
   final bool isBookmarked;
   final bool isLiked;
   final bool isDisliked;
-  final bool hasHint;
 
   // Per-step UI state (for display blocks — sets of stepIds)
   final Set<String> bookmarkedStepIds;
@@ -177,7 +183,6 @@ class BlockStepEngine extends StatefulWidget {
     this.isBookmarked = false,
     this.isLiked = false,
     this.isDisliked = false,
-    this.hasHint = false,
     this.bookmarkedStepIds = const {},
     this.likedStepIds = const {},
     this.dislikedStepIds = const {},
@@ -196,14 +201,25 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
   /// Every write goes through the setter, so [BlockStepEngine.onStepShown] is
   /// reported from one place however the index moved — mount, restore, skip to
   /// the question, advance, branch.
+  ///
+  /// The setter also keeps [ContentBlock.currentStepIndex] on the same step, so
+  /// `currentHint` and `currentHelp` — read by the owner's hint sheet and its
+  /// chat context — are the step the student is looking at.
   late int _stepIndex;
   int get _currentStepIndex => _stepIndex;
   set _currentStepIndex(int value) {
     _stepIndex = value;
+    if (value >= 0 && value < _steps.length) _visited.add(value);
+    widget.block.currentStepIndex = value;
     _scheduleStepShown();
   }
 
+  /// Every step the student has been shown in this card. A `go_to` can skip
+  /// steps; the history is these, not every step before the current one.
+  final Set<int> _visited = {};
+
   int? _shownStepIndex;
+  List<int> _shownOnScreen = const [];
   bool _stepShownScheduled = false;
 
   void _scheduleStepShown() {
@@ -213,10 +229,40 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
       _stepShownScheduled = false;
       if (!mounted) return;
       final index = _stepIndex;
-      if (index < 0 || index >= _steps.length || index == _shownStepIndex) return;
+      if (index < 0 || index >= _steps.length) return;
+      final onScreen = _stepsOnScreen();
+      if (index == _shownStepIndex && _sameIndices(onScreen, _shownOnScreen)) return;
       _shownStepIndex = index;
-      widget.onStepShown?.call(index);
+      _shownOnScreen = onScreen;
+      widget.onStepShown?.call(index, onScreen);
     });
+  }
+
+  static bool _sameIndices(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  bool get _isBlockDone => _state == _EngineState.blockComplete || widget.isCompleted;
+
+  /// The steps this card draws, in order. While a card is being worked through,
+  /// these are the ones visited before the current step, plus the current one. A
+  /// finished card keeps all of its visited steps. A card that was restored as
+  /// finished without a record of its visits draws all of its steps.
+  List<int> _stepsOnScreen() {
+    if (_isBlockDone) {
+      final all = [for (var i = 0; i < _steps.length; i++) i];
+      if (_visited.isEmpty) return all;
+      return all.where(_visited.contains).toList();
+    }
+    return [
+      for (var i = 0; i < _currentStepIndex && i < _steps.length; i++)
+        if (_visited.contains(i)) i,
+      if (_currentStepIndex < _steps.length) _currentStepIndex,
+    ];
   }
   late Map<String, StepAnswerState> _stepAnswers;
   late double _bestScoreKoef;
@@ -261,8 +307,14 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
 
   void _restoreOrInitState() {
     final saved = widget.savedProgress;
+    _visited.clear();
     if (saved != null && saved.blockId == widget.block.blockId) {
-      _currentStepIndex = saved.currentStepIndex.clamp(0, _steps.length - 1);
+      // Progress saved before visits were recorded: assume the steps up to the
+      // current one, which is what the card used to draw.
+      final last = saved.currentStepIndex.clamp(0, _steps.length - 1);
+      _visited.addAll(saved.visitedSteps?.where((i) => i >= 0 && i < _steps.length) ??
+          [for (var i = 0; i < last; i++) i]);
+      _currentStepIndex = last;
       _stepAnswers = Map.from(saved.stepAnswers);
       _bestScoreKoef = saved.bestScoreKoef;
       _earnedXp = saved.earnedXp;
@@ -331,6 +383,12 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
   @override
   void didUpdateWidget(covariant BlockStepEngine oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // An owner may hand over a new copy of the same block (`copyWith`, a
+    // re-parse). It has to point at the step on screen too, or its hint is the
+    // first step's again.
+    if (!identical(oldWidget.block, widget.block)) {
+      widget.block.currentStepIndex = _currentStepIndex;
+    }
     if (oldWidget.block.blockId != widget.block.blockId) {
       _disposeVideoControllers();
       _restoreOrInitState();
@@ -825,6 +883,7 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
       currentStepIndex: _currentStepIndex,
       stepAnswers: Map.from(_stepAnswers),
       isBlockCompleted: _state == _EngineState.blockComplete,
+      visitedSteps: (_visited.toList()..sort()),
       bestScoreKoef: _bestScoreKoef == _kUninitializedScore ? 0.0 : _bestScoreKoef,
       earnedXp: _earnedXp,
       quizMark: _quizMark,
@@ -849,13 +908,14 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
 
     // All other blocks: render each visited step as its own card.
     // Completed steps show as dimmed history; the current step is active.
-    final isBlockDone = _state == _EngineState.blockComplete || widget.isCompleted;
-    final visibleCount = isBlockDone ? _steps.length : _currentStepIndex + 1;
+    // A step a `go_to` skipped is not history: the student never saw it.
+    final isBlockDone = _isBlockDone;
+    final onScreen = _stepsOnScreen();
 
     return Column(
       children: [
-        for (int i = 0; i < visibleCount; i++) ...[
-          if (i > 0) const SizedBox(height: 16),
+        for (final i in onScreen) ...[
+          if (i != onScreen.first) const SizedBox(height: 16),
           i < _currentStepIndex || isBlockDone
               ? _buildHistoryStepCard(i)
               : _buildActiveStepCard(),
@@ -878,20 +938,30 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
     return isTextPrompt && next.isEvaluationStep;
   }
 
-  /// Exercise card: ALL steps rendered inside a single bubble.
-  /// Display steps are passive context; only question steps are interactive.
+  /// Exercise card: the steps inside a single bubble, revealed as the student
+  /// gets to them. Display steps are passive context; only question steps are
+  /// interactive, and only the current one takes an answer.
+  ///
+  /// The bubble used to draw every step from the start. A question below the
+  /// current one then showed its options or its input field, looked answerable
+  /// and ignored every tap, and the check button asked for an answer to the
+  /// question above. Now a question appears when it is the one to answer, with
+  /// the text before it, and the answered ones stay above it.
   Widget _buildExerciseCard() {
-    final isBlockDone = _state == _EngineState.blockComplete || widget.isCompleted;
+    final isBlockDone = _isBlockDone;
 
     final children = <Widget>[];
+    int? previous;
 
-    for (int i = 0; i < _steps.length; i++) {
+    for (final i in _stepsOnScreen()) {
       final step = _steps[i];
       final isQuestion = step.isEvaluationStep;
+      final mergesWithPrompt = previous == i - 1 && _isPromptForNextQuestion(i - 1);
+      previous = i;
 
       // Divider between sections — but NOT between a text prompt and
       // the question that follows it (they merge visually).
-      if (children.isNotEmpty && !_isPromptForNextQuestion(i > 0 ? i - 1 : -1)) {
+      if (children.isNotEmpty && !mergesWithPrompt) {
         children.add(const SizedBox(height: 24));
         children.add(Divider(color: AppColors.primaryDark.withValues(alpha: 0.08), height: 1));
         children.add(const SizedBox(height: 24));
@@ -937,7 +1007,7 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
     if (widget.controller == null) {
       children.add(const SizedBox(height: 24));
       children.add(_buildBottomRow());
-    } else if (widget.hasHint) {
+    } else if (_offersHint) {
       children.add(const SizedBox(height: 16));
       children.add(_buildActionButtons());
     }
@@ -992,7 +1062,9 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        _buildStepActionButtons(step),
+        // No "?" on a step the student has left: the hint belongs to the step
+        // being worked on, and the owner's sheet shows the current one.
+        _buildStepActionButtons(step, offerHint: false),
         const BlockMainButton(isComplete: true),
       ],
     );
@@ -1071,14 +1143,14 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
   /// The closures are built here rather than passed as bare nullable callbacks: a
   /// per-step toggle needs the step id, and a `GestureDetector` with a non-null
   /// `onTap` also absorbs the tap, which is the behaviour these rows have always had.
-  Widget _buildStepActionButtons(BlockStep step) {
+  Widget _buildStepActionButtons(BlockStep step, {bool offerHint = true}) {
     final stepId = step.stepId;
     return BlockActionBar(
       exportMode: widget.exportMode,
       isBookmarked: widget.bookmarkedStepIds.contains(stepId),
       isLiked: widget.likedStepIds.contains(stepId),
       isDisliked: widget.dislikedStepIds.contains(stepId),
-      showHint: widget.hasHint,
+      showHint: offerHint && _offersHint,
       onBookmark: () => widget.onStepBookmarkToggle?.call(stepId),
       onLike: () => widget.onStepLikeToggle?.call(stepId),
       onDislike: () => widget.onStepDislikeToggle?.call(stepId),
@@ -1096,12 +1168,23 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
       isBookmarked: widget.isBookmarked,
       isLiked: widget.isLiked,
       isDisliked: widget.isDisliked,
-      showHint: widget.hasHint,
+      showHint: _offersHint,
       onBookmark: widget.onBookmarkToggle,
       onLike: widget.onLikeToggle,
       onDislike: widget.onDislikeToggle,
       onHint: widget.onHintRequested,
     );
+  }
+
+  /// Whether the step on screen has a hint to open: its own, or the block's.
+  bool get _offersHint => widget.onHintRequested != null && widget.block.hasHint;
+
+  /// What the disabled check button says: a field is typed into, not picked.
+  String get _missingAnswerMessage {
+    final type = _currentStep.evaluationConfig?.type;
+    return type == 'numeric' || type == 'open'
+        ? AppStrings.engineEnterAnswer
+        : AppStrings.engineSelectAnswer;
   }
 
   Widget _buildMainButton() {
@@ -1155,7 +1238,7 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
       enabled: enabled,
       onTap: onTap,
       disabledMessage: widget.isCurrent && _state == _EngineState.awaitingAnswer
-          ? AppStrings.engineSelectAnswer
+          ? _missingAnswerMessage
           : null,
     );
   }

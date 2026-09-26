@@ -252,14 +252,18 @@ class _PreviewPageState extends State<PreviewPage> {
             if (mark != null) 'mark': mark,
           });
         },
-        hasHint: block.hasHint,
-        onHintRequested: block.hasHint ? () => showPreviewHint(context, block) : null,
+        onHintRequested: () => showPreviewHint(context, block),
         // Where the pupil is, every time it changes — the same report, and the same
         // shape, as the lesson player's.
-        onStepShown: (index) {
+        onStepShown: (index, onScreen) {
           final stepId = _stepIdAt(block, index);
           if (stepId.isEmpty) return;
-          _channel.send({'type': 'stepChanged', 'blockId': block.blockId, 'stepId': stepId});
+          _channel.send({
+            'type': 'stepChanged',
+            'blockId': block.blockId,
+            'stepId': stepId,
+            'shownStepIds': [for (final i in onScreen) _stepIdAt(block, i)],
+          });
         },
         onCrossBlockNavigate: (blockId) {
           _channel.send({
@@ -308,10 +312,11 @@ class _PreviewPageState extends State<PreviewPage> {
       lessonId: lessonId,
       startBlockId: _startBlockId,
       onRefTapped: _reportRef,
-      onStepChanged: (blockId, stepId) => _channel.send({
+      onStepChanged: (blockId, stepId, shownStepIds) => _channel.send({
         'type': 'stepChanged',
         'blockId': blockId,
         'stepId': stepId,
+        'shownStepIds': shownStepIds,
       }),
       onCompleted: ({required int xp, required double scoreKoef, String? mark}) {
         _channel.send({

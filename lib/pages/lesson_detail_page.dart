@@ -1826,11 +1826,12 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
         onLikeToggle: () => _toggleLike(index),
         onDislikeToggle: () => _toggleDislike(index),
         onWrongAnswer: () => _autoBookmarkOnWrong(index),
-        onHintRequested: block.hasHint ? () => _showHintDialog(index) : null,
+        // Always wired: the engine offers the "?" for the step on screen, and
+        // `_showHintDialog` reads that step's hint.
+        onHintRequested: () => _showHintDialog(index),
         isBookmarked: block.isBookmarked,
         isLiked: block.isLiked,
         isDisliked: block.isDisliked,
-        hasHint: block.hasHint,
         // Per-step actions (display blocks — each step independently actionable)
         onStepBookmarkToggle: (stepId) => _toggleStepBookmark(index, stepId),
         onStepLikeToggle: (stepId) => _toggleStepLike(index, stepId),

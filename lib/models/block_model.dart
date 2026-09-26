@@ -1330,18 +1330,26 @@ class ContentBlock {
   }
 
   /// Get hint for the current block/step (if available)
+  ///
+  /// "Current" is [currentStepIndex], which `BlockStepEngine` keeps on the step it
+  /// has on screen. Nothing used to move it, so every step of a card offered the
+  /// first step's hint. An empty step value counts as absent, so it does not hide
+  /// the block's.
   String? get currentHint {
     if (isAtomicFormat) return atomicHint;
     // Step-level hint first, then block-level fallback (exercise blocks)
-    return currentStep?.hint ?? atomicHint;
+    return _filled(currentStep?.hint) ?? atomicHint;
   }
 
   /// Get help for the current block/step (if available)
   String? get currentHelp {
     if (isAtomicFormat) return atomicHelp;
     // Step-level help first, then block-level fallback (exercise blocks)
-    return currentStep?.help ?? atomicHelp;
+    return _filled(currentStep?.help) ?? atomicHelp;
   }
+
+  static String? _filled(String? text) =>
+      text == null || text.trim().isEmpty ? null : text;
 
   /// Check if block has a hint
   bool get hasHint {

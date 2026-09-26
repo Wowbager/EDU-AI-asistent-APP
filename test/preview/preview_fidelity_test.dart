@@ -108,29 +108,63 @@ void main() {
     expect(await layout(preview: true), app);
   });
 
-  testWidgets('the question mark is the first step\'s, on every step, as in the app', (tester) async {
+  testWidgets('the question mark on each step is that step\'s hint, or the card\'s', (tester) async {
     final refs = <PreviewRef>[];
     await tester.pumpWidget(_sized(PreviewExpandedBlock(
-      block: _card(firstHint: 'První nápověda'),
+      block: _card(laterHint: 'Ke druhému kroku'),
       onRefTapped: refs.add,
     )));
     await tester.pumpAndSettle();
-    // The app shows the "?" under every step of the card, and it opens step 1's hint.
+    // Only step 2 has a hint, and nothing falls back to a card hint.
+    expect(find.byIcon(Icons.help_outline), findsOneWidget);
+    await tester.ensureVisible(find.byIcon(Icons.help_outline));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.help_outline));
+    expect(refs.single.stepId, 's2');
+    expect(refs.single.field, 'hint');
+    expect(find.textContaining('žák ji neuvidí'), findsNothing);
+
+    // The card's hint is on every step without its own, and is written once.
+    refs.clear();
+    await tester.pumpWidget(_sized(PreviewExpandedBlock(
+      block: _card(firstHint: 'Vlastní', blockHint: 'Ke kartě'),
+      onRefTapped: refs.add,
+    )));
+    await tester.pumpAndSettle();
     expect(find.byIcon(Icons.help_outline), findsNWidgets(3));
+    expect(find.textContaining('Ke kartě'), findsOneWidget);
     await tester.ensureVisible(find.byIcon(Icons.help_outline).last);
     await tester.pumpAndSettle();
     await tester.tap(find.byIcon(Icons.help_outline).last);
-    expect(refs.single.stepId, 's1');
-    expect(refs.single.field, 'hint');
+    expect(refs.single.stepId, isNull, reason: 'the card\'s hint is not written onto the step');
+  });
 
-    // A hint written only on a later step is never offered to a student.
+  testWidgets('a question card never offers the hint of the text between its questions', (tester) async {
     await tester.pumpWidget(_sized(PreviewExpandedBlock(
-      block: _card(laterHint: 'Tu žák neuvidí'),
+      block: ContentBlock.fromJson({
+        'block_id': 'B1',
+        'type': 'question',
+        'steps': [
+          {'id': 's1', 'type': 'text', 'order': 1, 'content': 'Zadání', 'hint': 'Neviditelná'},
+          {
+            'id': 's2',
+            'type': 'question',
+            'order': 2,
+            'content': 'Otázka',
+            'question': {
+              'type': 'multiple_choice',
+              'options': [
+                {'id': 'a', 'text': 'Ano', 'is_correct': true},
+              ],
+            },
+          },
+        ],
+      }),
       onRefTapped: (_) {},
     )));
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.help_outline), findsNothing);
-    expect(find.textContaining('žák ji neuvidí'), findsOneWidget);
+    expect(find.textContaining('(žák ji neuvidí): Neviditelná'), findsOneWidget);
   });
 
   group('Vyzkoušet', () {
@@ -139,6 +173,7 @@ void main() {
       required List<ContentBlock> blocks,
       GlobalKey<PreviewLessonPlayerState>? key,
       List<PreviewRef>? clicks,
+      List<List<String>>? screens,
     }) async {
       final positions = <String>[];
       await tester.pumpWidget(MaterialApp(
@@ -148,7 +183,10 @@ void main() {
             blocks: blocks,
             lessonId: 'L1',
             onRefTapped: (ref) => clicks?.add(ref),
-            onStepChanged: (blockId, stepId) => positions.add('$blockId/$stepId'),
+            onStepChanged: (blockId, stepId, shown) {
+              positions.add('$blockId/$stepId');
+              screens?.add(shown);
+            },
             onCompleted: ({required int xp, required double scoreKoef, String? mark}) {},
             onNavState: (_) {},
           ),
@@ -199,12 +237,53 @@ void main() {
       expect(clicks, isEmpty);
     });
 
-    testWidgets('offers the hint the way the app does', (tester) async {
-      await run(tester, blocks: [_card(firstHint: 'Zkus si to nakreslit')]);
-      expect(find.byIcon(Icons.help_outline), findsWidgets);
-      await tester.tap(find.byIcon(Icons.help_outline).first);
+    testWidgets('offers the hint of the step on screen, as the app does', (tester) async {
+      await run(tester, blocks: [_card(laterHint: 'Zkus si to nakreslit')]);
+      expect(find.byIcon(Icons.help_outline), findsNothing);
+      await next(tester);
+      await tester.tap(find.byIcon(Icons.help_outline));
       await tester.pumpAndSettle();
       expect(find.textContaining('Zkus si to nakreslit'), findsOneWidget);
+    });
+
+    testWidgets('says which steps of the card the pupil can see', (tester) async {
+      final screens = <List<String>>[];
+      await run(tester, blocks: [_display('B1', ['a', 'b', 'c'])], screens: screens);
+      expect(screens.last, ['s1']);
+      await next(tester);
+      expect(screens.last, ['s1', 's2']);
+    });
+
+    testWidgets('a finished card keeps its answers', (tester) async {
+      await run(tester, blocks: [
+        ContentBlock.fromJson({
+          'block_id': 'B1',
+          'type': 'question',
+          'steps': [
+            {
+              'id': 'q1',
+              'type': 'question',
+              'order': 1,
+              'content': 'Otázka',
+              'question': {
+                'type': 'multiple_choice',
+                'options': [
+                  {'id': 'a', 'text': 'Správně', 'is_correct': true, 'feedback': 'Výborně'},
+                  {'id': 'b', 'text': 'Špatně', 'is_correct': false},
+                ],
+              },
+            },
+          ],
+        }),
+        _display('B2', ['Další karta']),
+      ]);
+      await tester.tap(find.text('Správně'));
+      await tester.pumpAndSettle();
+      await next(tester); // check
+      await next(tester); // continue → the next card
+      expect(find.textContaining('Další karta'), findsOneWidget);
+      // Re-created as merely "completed", the card forgot the answer and its feedback.
+      expect(find.text('Výborně'), findsOneWidget);
     });
 
     testWidgets('survives the current card losing steps mid-run', (tester) async {
@@ -217,7 +296,7 @@ void main() {
                 blocks: blocks,
                 lessonId: 'L1',
                 onRefTapped: (_) {},
-                onStepChanged: (b, s) => positions.add('$b/$s'),
+                onStepChanged: (b, s, _) => positions.add('$b/$s'),
                 onCompleted: ({required int xp, required double scoreKoef, String? mark}) {},
                 onNavState: (_) {},
               ),

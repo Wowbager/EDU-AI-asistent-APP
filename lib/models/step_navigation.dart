@@ -86,6 +86,10 @@ class StepProgressData {
   double bestScoreKoef;   // highest score_koef from answered questions (default 1.0)
   int earnedXp;           // block.xp * bestScoreKoef
   String? quizMark;       // final mark value for quiz grading
+  /// The steps the student has been shown, by index. A `go_to` can skip steps,
+  /// and a skipped step is not drawn as history. Null in progress saved before
+  /// this existed; the engine then assumes every step up to the current one.
+  final List<int>? visitedSteps;
 
   StepProgressData({
     required this.blockId,
@@ -95,6 +99,7 @@ class StepProgressData {
     this.bestScoreKoef = 1.0,
     this.earnedXp = 0,
     this.quizMark,
+    this.visitedSteps,
   }) : stepAnswers = stepAnswers ?? {};
 
   Map<String, dynamic> toJson() => {
@@ -105,6 +110,7 @@ class StepProgressData {
     'bestScoreKoef': bestScoreKoef,
     'earnedXp': earnedXp,
     if (quizMark != null) 'quizMark': quizMark,
+    if (visitedSteps != null) 'visitedSteps': visitedSteps,
   };
 
   factory StepProgressData.fromJson(Map<String, dynamic> json) {
@@ -123,6 +129,7 @@ class StepProgressData {
       bestScoreKoef: (json['bestScoreKoef'] as num?)?.toDouble() ?? 1.0,
       earnedXp: json['earnedXp'] as int? ?? 0,
       quizMark: json['quizMark'] as String?,
+      visitedSteps: (json['visitedSteps'] as List?)?.whereType<int>().toList(),
     );
   }
 }
