@@ -112,6 +112,12 @@ class BlockStepEngine extends StatefulWidget {
   final void Function(StepProgressData)? onStepProgress;
   final StepProgressData? savedProgress;
 
+  /// Called with the index of the step now on screen whenever it changes,
+  /// including the first one after mounting or restoring — which is what
+  /// [onStepProgress] does not cover. Reported after the frame, once per change.
+  /// Null in the student's app; the editor's preview follows the run with it.
+  final void Function(int stepIndex)? onStepShown;
+
   /// Optional controller for external answer confirmation (used by QuizPage).
   /// When provided, the engine hides its own bottom row and lets the parent
   /// drive confirm/next via the controller.
@@ -157,6 +163,7 @@ class BlockStepEngine extends StatefulWidget {
     this.onChatRequested,
     this.onStepProgress,
     this.savedProgress,
+    this.onStepShown,
     this.controller,
     this.hideEvaluation = false,
     this.onBookmarkToggle,
@@ -185,7 +192,32 @@ class _BlockStepEngineState extends State<BlockStepEngine> {
   static const _kUninitializedScore = -1.0;
 
   late _EngineState _state;
-  late int _currentStepIndex;
+
+  /// Every write goes through the setter, so [BlockStepEngine.onStepShown] is
+  /// reported from one place however the index moved — mount, restore, skip to
+  /// the question, advance, branch.
+  late int _stepIndex;
+  int get _currentStepIndex => _stepIndex;
+  set _currentStepIndex(int value) {
+    _stepIndex = value;
+    _scheduleStepShown();
+  }
+
+  int? _shownStepIndex;
+  bool _stepShownScheduled = false;
+
+  void _scheduleStepShown() {
+    if (widget.onStepShown == null || _stepShownScheduled) return;
+    _stepShownScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _stepShownScheduled = false;
+      if (!mounted) return;
+      final index = _stepIndex;
+      if (index < 0 || index >= _steps.length || index == _shownStepIndex) return;
+      _shownStepIndex = index;
+      widget.onStepShown?.call(index);
+    });
+  }
   late Map<String, StepAnswerState> _stepAnswers;
   late double _bestScoreKoef;
   late int _earnedXp;

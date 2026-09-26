@@ -7,15 +7,20 @@
 //     widget that would write, award or report — rather than at the call site, so
 //     a future caller cannot forget to pass it.
 //
-//  2. Wrap rendered leaves in a target that reports the `PreviewRef` behind them
-//     and draws a hover outline, which is what makes click-to-edit possible.
+//  2. Wrap rendered leaves in a target that reports the `PreviewRef` behind them,
+//     which is what makes click-to-edit possible in "Náhled".
+//
+// A target changes nothing about how its child is laid out or painted. It used to
+// draw a hover outline through a permanent 1.5 px transparent border, so every
+// wrapped leaf was 3 px narrower than in the student's app and text wrapped at a
+// different word — the preview disagreed with the app it exists to show. The only
+// visible sign of a target now is the pointer cursor.
 //
 // Nothing here is used in a normal session: `PreviewMode.of(context)` returns the
 // disabled instance when no `PreviewScope` is above, and every guard is a no-op.
 
 import 'package:flutter/material.dart';
 
-import '../core/theme/app_colors.dart';
 import 'preview_ref.dart';
 
 @immutable
@@ -90,8 +95,12 @@ class PreviewScope extends InheritedWidget {
 /// A rendered leaf that reports where it came from when the author clicks it.
 ///
 /// Outside preview mode this is the child and nothing else — no gesture detector,
-/// no mouse region, no rebuild cost in a student's session.
-class PreviewTarget extends StatefulWidget {
+/// no mouse region, no rebuild cost in a student's session. The same holds in
+/// "Vyzkoušet": there the author is taking the card as a pupil would, a tap belongs
+/// to the pupil's controls, and the editor follows the run on its own
+/// (`PreviewLessonPlayer`'s `stepChanged`). A tap either answers or reports where
+/// something is authored, never both — the rule the option taps already follow.
+class PreviewTarget extends StatelessWidget {
   final Widget child;
   final String? stepId;
   final String? optionId;
@@ -100,25 +109,12 @@ class PreviewTarget extends StatefulWidget {
   /// `text`, `feedback`. It is what the editor focuses on a click.
   final String? field;
 
-  /// Draws the 1.5px hover outline around [child].
-  ///
-  /// Off for the card-level target `_StepCard` wraps around its whole body
-  /// (see `preview_expanded_block.dart`): that target exists to widen the hit
-  /// area to blank space, not to be seen, and a border around the entire card
-  /// on every hover would be noise fighting the card's own `highlighted`
-  /// border. The leaf targets nested inside it keep their outline as normal.
-  final bool outline;
-
   /// How this target claims hits.
   ///
-  /// `deferToChild` (the default, and what every leaf target wants) makes a
-  /// target with no visible pixels of its own — e.g. a `Container` with a
-  /// transparent border around see-through padding — untappable there,
-  /// because it has nothing for the gesture arena to hit-test against except
-  /// what [child] itself paints. That is exactly right for a leaf: the click
-  /// area should be the glyphs/image, not the padding around them. The
-  /// card-level target wants the opposite — a click on blank card padding
-  /// should still count — so it passes `opaque`.
+  /// `deferToChild` (the default, and what every leaf target wants) makes the
+  /// click area the glyphs or the image, not the padding around them. The
+  /// card-level target wants the opposite — a click on blank card padding should
+  /// still count — so it passes `opaque`.
   final HitTestBehavior behavior;
 
   const PreviewTarget({
@@ -127,27 +123,15 @@ class PreviewTarget extends StatefulWidget {
     this.stepId,
     this.optionId,
     this.field,
-    this.outline = true,
     this.behavior = HitTestBehavior.deferToChild,
   });
 
   @override
-  State<PreviewTarget> createState() => _PreviewTargetState();
-}
-
-class _PreviewTargetState extends State<PreviewTarget> {
-  bool _hovered = false;
-
-  @override
   Widget build(BuildContext context) {
     final mode = PreviewMode.of(context);
-    if (!mode.enabled) return widget.child;
+    if (!mode.enabled || mode.interactive) return child;
 
-    final ref = mode.refFor(
-      stepId: widget.stepId,
-      optionId: widget.optionId,
-      field: widget.field,
-    );
+    final ref = mode.refFor(stepId: stepId, optionId: optionId, field: field);
 
     // A leaf target nested inside this one (e.g. the image or a question's
     // options, rendered by `StepContentRenderer` inside the card-level
@@ -163,21 +147,10 @@ class _PreviewTargetState extends State<PreviewTarget> {
     // doesn't cover — it never steals a hit the inner one already answered.
     return MouseRegion(
       cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
       child: GestureDetector(
-        behavior: widget.behavior,
+        behavior: behavior,
         onTap: () => mode.onRefTapped?.call(ref),
-        child: Container(
-          decoration: BoxDecoration(
-            border: Border.all(
-              color: widget.outline && _hovered ? AppColors.primary : Colors.transparent,
-              width: 1.5,
-            ),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: widget.child,
-        ),
+        child: child,
       ),
     );
   }

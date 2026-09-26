@@ -15,6 +15,7 @@ import '../models/step_navigation.dart';
 import '../widgets/block_step_engine.dart';
 import 'preview_channel.dart';
 import 'preview_expanded_block.dart';
+import 'preview_hint.dart';
 import 'preview_lesson_player.dart';
 import 'preview_mode.dart';
 import 'preview_ref.dart';
@@ -93,8 +94,9 @@ class _PreviewPageState extends State<PreviewPage> {
           _playerKey.currentState?.back();
         case 'highlight':
           // In the expanded view every step is on screen, so a highlight has
-          // somewhere to land: it outlines the step the editor is working on. The
-          // played view has only one step visible and ignores it.
+          // somewhere to land: it outlines the step the editor is working on. A
+          // played view never shows which step is focused — the pupil's screen has
+          // no such thing — so it reads nothing of this.
           final ref = message['ref'];
           setState(() {
             _highlightedStepId = ref is Map ? ref['stepId'] as String? : null;
@@ -250,11 +252,14 @@ class _PreviewPageState extends State<PreviewPage> {
             if (mark != null) 'mark': mark,
           });
         },
-        onStepProgress: (progress) {
-          _channel.send({
-            'type': 'stepChanged',
-            'stepId': _stepIdAt(block, progress.currentStepIndex),
-          });
+        hasHint: block.hasHint,
+        onHintRequested: block.hasHint ? () => showPreviewHint(context, block) : null,
+        // Where the pupil is, every time it changes — the same report, and the same
+        // shape, as the lesson player's.
+        onStepShown: (index) {
+          final stepId = _stepIdAt(block, index);
+          if (stepId.isEmpty) return;
+          _channel.send({'type': 'stepChanged', 'blockId': block.blockId, 'stepId': stepId});
         },
         onCrossBlockNavigate: (blockId) {
           _channel.send({

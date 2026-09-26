@@ -137,26 +137,31 @@ class _StepCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: highlighted ? AppColors.primary : AppColors.primaryDark12,
-          width: highlighted ? 2 : 1,
-        ),
+        border: Border.all(color: AppColors.primaryDark12, width: 1),
       ),
+      // The outline is painted *over* the card, never into its box. It used to
+      // widen the border from 1 to 2 px, and a `Container` adds its border to its
+      // padding, so the step the editor had focused was laid out 2 px narrower and
+      // its text wrapped at a different word: focusing a step changed what the
+      // preview claimed the student would read. Nothing that decides layout may
+      // depend on `highlighted` (test/preview/layout_invariance_test.dart).
+      foregroundDecoration: highlighted
+          ? BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.primary, width: 2),
+            )
+          : null,
       // A card-level target, under the leaf ones `StepContentRenderer` and
       // `_helpMarkers` add. Before this, the click-to-edit hit area was only
       // ever whatever glyphs/image a leaf `PreviewTarget` drew around — for a
       // short line of text that is a sliver of the card, and the rest (the
       // padding around it, the gaps between children, a step with no leaf
       // target at all) was dead space that didn't jump the editor anywhere.
-      // `opaque` makes this target claim that dead space too; `outline:
-      // false` keeps it invisible, because a 1.5px border flashing around the
-      // *entire* card on every hover would be noise fighting the card's own
-      // `highlighted` border above. It still loses every tap to a leaf
-      // target or to `_bottomRow`'s own buttons — see
+      // `opaque` makes this target claim that dead space too. It still loses
+      // every tap to a leaf target or to `_bottomRow`'s own buttons — see
       // `PreviewTarget.behavior`'s doc comment for why nesting is safe.
       child: PreviewTarget(
         stepId: step.stepId,
-        outline: false,
         behavior: HitTestBehavior.opaque,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -181,22 +186,27 @@ class _StepCard extends StatelessWidget {
     );
   }
 
-  String? get _hint => step.hint ?? block.atomicHint;
-  String? get _help => step.help ?? block.atomicHelp;
-  bool get _hasHelp => (_hint ?? '').isNotEmpty || (_help ?? '').isNotEmpty;
+  /// Whether the student's app draws the question mark, and so whether this does.
+  ///
+  /// This used to be decided per step — this step's hint or help, else the card's —
+  /// on the reasoning that every step is on screen at once here. It described a
+  /// rule the app does not have. `lesson_detail_page` passes `block.hasHint`, which
+  /// reads `ContentBlock.currentHint`, and nothing in a lesson ever moves the
+  /// block's `currentStepIndex` off 0: the question mark and the sheet behind it
+  /// are the *first* step's hint, or the card's, on every step of the card. Help
+  /// with no hint is never offered either — the sheet opens on the hint and only
+  /// then escalates. The preview says what the student gets; the editor warns
+  /// about the text that no student will reach (`W_HINT_UNREACHABLE`).
+  bool get _appShowsHint => block.hasHint;
 
   /// The card's own controls, in the state this view renders its content in.
-  ///
-  /// The question mark is gated per step rather than per block, because every step
-  /// is on screen at once here: it shows exactly where the engine would show it if
-  /// that step were the current one.
   Widget _bottomRow() {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         BlockActionBar(
           exportMode: exportMode,
-          showHint: _hasHelp,
+          showHint: _appShowsHint,
           onHint: () => onRefTapped(_helpRef()),
           // Bookmark, like and dislike have no authored field behind them, so they
           // report the step. Reporting something true beats a dead zone that reads
@@ -212,22 +222,18 @@ class _StepCard extends StatelessWidget {
 
   PreviewRef _stepRef() => PreviewRef(blockId: block.blockId, stepId: step.stepId);
 
-  /// The most specific place the question mark's text is actually written.
+  /// Where the text the question mark opens is actually written: the first
+  /// step's hint, or the card's (see [_appShowsHint]).
   ///
   /// A block-level hint is sent **without** a `stepId`: the editor reads a ref
   /// carrying one as addressing the step, and would write the card's hint onto a
   /// step that never had one.
   PreviewRef _helpRef() {
-    if ((step.hint ?? '').isNotEmpty) {
-      return PreviewRef(blockId: block.blockId, stepId: step.stepId, field: 'hint');
+    final first = block.steps.isEmpty ? null : block.steps.first;
+    if (first != null && (first.hint ?? '').isNotEmpty) {
+      return PreviewRef(blockId: block.blockId, stepId: first.stepId, field: 'hint');
     }
-    if ((step.help ?? '').isNotEmpty) {
-      return PreviewRef(blockId: block.blockId, stepId: step.stepId, field: 'help');
-    }
-    if ((block.atomicHint ?? '').isNotEmpty) {
-      return PreviewRef(blockId: block.blockId, field: 'hint');
-    }
-    return PreviewRef(blockId: block.blockId, field: 'help');
+    return PreviewRef(blockId: block.blockId, field: 'hint');
   }
 
   /// Where each answer leads, read straight off the options.
@@ -246,29 +252,50 @@ class _StepCard extends StatelessWidget {
     ];
   }
 
-  /// What the question mark would say, spelled out.
+  /// What the question mark would say, spelled out — and what it never will.
   ///
-  /// Untruncated, unlike the branch labels: the "?" beside them is now the way to
-  /// go and edit the text, so these markers are here to be *read*, and forty
-  /// characters of a hint is not a hint. Each one lands on the same field the
-  /// question mark does.
+  /// Untruncated, unlike the branch labels: the "?" beside them is the way to go
+  /// and edit the text, so these markers are here to be *read*, and forty
+  /// characters of a hint is not a hint.
+  ///
+  /// The app shows one hint and one help for the whole card (see [_appShowsHint]),
+  /// so they are drawn once, on the first step, and each lands on the field it is
+  /// really written in — the card's own hint is addressed without a `stepId`, or a
+  /// click would write it onto the step. A later step's own hint or help is the
+  /// author's text that no student reaches, and is drawn as exactly that.
   List<Widget> _helpMarkers() {
     final markers = <Widget>[];
-    final hint = _hint;
-    final help = _help;
-    if ((hint ?? '').isNotEmpty) {
-      markers.add(PreviewTarget(
-        stepId: step.stepId,
-        field: 'hint',
-        child: _Marker(icon: Icons.lightbulb_outline, text: 'Nápověda: $hint'),
-      ));
+    final isFirst = block.steps.isNotEmpty && block.steps.first.stepId == step.stepId;
+
+    Widget marker({required String field, required bool own, required String text, bool unseen = false}) {
+      final label = field == 'hint' ? 'Nápověda' : 'Pomoc';
+      final icon = field == 'hint' ? Icons.lightbulb_outline : Icons.school_outlined;
+      return PreviewTarget(
+        stepId: own ? step.stepId : null,
+        field: field,
+        child: _Marker(
+          icon: icon,
+          text: unseen ? '$label (žák ji neuvidí): $text' : '$label: $text',
+          muted: unseen,
+        ),
+      );
     }
-    if ((help ?? '').isNotEmpty) {
-      markers.add(PreviewTarget(
-        stepId: step.stepId,
-        field: 'help',
-        child: _Marker(icon: Icons.school_outlined, text: 'Pomoc: $help'),
-      ));
+
+    final ownHint = step.hint ?? '';
+    final ownHelp = step.help ?? '';
+    if (isFirst) {
+      final hintOwn = ownHint.isNotEmpty;
+      final hint = hintOwn ? ownHint : (block.atomicHint ?? '');
+      final helpOwn = ownHelp.isNotEmpty;
+      final help = helpOwn ? ownHelp : (block.atomicHelp ?? '');
+      if (hint.isNotEmpty) markers.add(marker(field: 'hint', own: hintOwn, text: hint));
+      // Help is only ever reached from an open hint.
+      if (help.isNotEmpty) {
+        markers.add(marker(field: 'help', own: helpOwn, text: help, unseen: hint.isEmpty));
+      }
+    } else {
+      if (ownHint.isNotEmpty) markers.add(marker(field: 'hint', own: true, text: ownHint, unseen: true));
+      if (ownHelp.isNotEmpty) markers.add(marker(field: 'help', own: true, text: ownHelp, unseen: true));
     }
     if (markers.isEmpty) return const [];
     return [const SizedBox(height: 10), ...markers];
@@ -304,7 +331,10 @@ class _Marker extends StatelessWidget {
   final IconData icon;
   final String text;
 
-  const _Marker({required this.icon, required this.text});
+  /// Text the student never gets: drawn fainter, so it is not read as content.
+  final bool muted;
+
+  const _Marker({required this.icon, required this.text, this.muted = false});
 
   @override
   Widget build(BuildContext context) {
@@ -318,7 +348,11 @@ class _Marker extends StatelessWidget {
           Expanded(
             child: Text(
               text,
-              style: TextStyle(fontSize: 12, color: AppColors.primaryDark64),
+              style: TextStyle(
+                fontSize: 12,
+                color: muted ? AppColors.primaryDark48 : AppColors.primaryDark64,
+                fontStyle: muted ? FontStyle.italic : FontStyle.normal,
+              ),
             ),
           ),
         ],

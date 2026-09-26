@@ -13,28 +13,47 @@
 // re-entered, which is what you want anyway when the reason you went back was to
 // take the other branch.
 
+//
+// Two more things the editor relies on:
+//
+//  * **Where the run is.** Every time the step on screen changes — the first card
+//    mounting, the next card, a branch to another card, back, restart, a move
+//    within a card — `onStepChanged` reports `(blockId, stepId)`, once per change.
+//    It comes from the engine's `onStepShown`, which is fired from the one setter
+//    all of the engine's moves go through, rather than from a call at each place
+//    this file moves. The editor follows the run with it.
+//  * **Positions are card ids, not indices.** The author edits while the run is
+//    open: cards are reordered and deleted under it. An index into `blocks` then
+//    points at a different card, so the history and the current card are kept by
+//    `blockId` and resolved against the lesson as it is now.
+//
+// Taps are the pupil's here. `PreviewScope(interactive: true)` makes every
+// `PreviewTarget` inert, so clicking text or a picture does what it does in the
+// app — nothing — and never jumps the editor.
+
 import 'package:flutter/material.dart';
 
 import '../models/block_model.dart';
 import '../models/step_navigation.dart';
 import '../widgets/block_step_engine.dart';
+import 'preview_hint.dart';
 import 'preview_mode.dart';
 import 'preview_ref.dart';
 
-/// Somewhere the author has been: which block, and how far into it.
+/// Somewhere the author has been: which card, and how far into it.
 @immutable
 class _Visit {
-  final int blockIndex;
+  final String blockId;
   final int stepIndex;
 
-  const _Visit(this.blockIndex, this.stepIndex);
+  const _Visit(this.blockId, this.stepIndex);
 
   @override
   bool operator ==(Object other) =>
-      other is _Visit && other.blockIndex == blockIndex && other.stepIndex == stepIndex;
+      other is _Visit && other.blockId == blockId && other.stepIndex == stepIndex;
 
   @override
-  int get hashCode => Object.hash(blockIndex, stepIndex);
+  int get hashCode => Object.hash(blockId, stepIndex);
 }
 
 class PreviewLessonPlayer extends StatefulWidget {
@@ -42,10 +61,12 @@ class PreviewLessonPlayer extends StatefulWidget {
   final ExportMode exportMode;
   final String? lessonId;
 
-  /// Where to start — the card the author has selected in the editor.
+  /// Where to start — the card the author had selected when the run began.
   final String? startBlockId;
 
   final void Function(PreviewRef ref) onRefTapped;
+
+  /// The step now on screen, whenever it changes. See the file comment.
   final void Function(String blockId, String stepId) onStepChanged;
   final void Function({required int xp, required double scoreKoef, String? mark}) onCompleted;
 
@@ -72,12 +93,12 @@ class PreviewLessonPlayer extends StatefulWidget {
 class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
   final ScrollController _scroll = ScrollController();
 
-  /// Index of the block the author is on; everything before it is history.
-  late int _current;
+  /// The card the author is on; the cards from [_firstId] up to it are history.
+  late String _currentId;
 
-  /// Index of the first block shown, so starting mid-lesson does not render the
-  /// cards before it as though they had been completed.
-  late int _first;
+  /// The first card shown, so starting mid-lesson does not render the cards
+  /// before it as though they had been completed.
+  late String _firstId;
 
   /// Where the author has been, oldest first. The current position is the last
   /// entry, so a back is "drop the last, restore the one before".
@@ -88,12 +109,17 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
   int _generation = 0;
   StepProgressData? _restore;
 
+  /// The step the current card's engine last showed, and the last position sent
+  /// to the editor — so a rebuild that changes nothing sends nothing.
+  int _shownStep = 0;
+  _Visit? _reported;
+
   @override
   void initState() {
     super.initState();
-    _first = _indexOfStart();
-    _current = _first;
-    _history.add(_Visit(_current, 0));
+    _firstId = _startId();
+    _currentId = _firstId;
+    _history.add(_Visit(_currentId, 0));
     WidgetsBinding.instance.addPostFrameCallback((_) => _reportNavState());
   }
 
@@ -107,21 +133,35 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
       restart();
       return;
     }
+    if (widget.blocks.isEmpty) return;
 
-    // The author can delete cards while the run is open. `_first`, `_current` and
-    // the history are positions in `widget.blocks`, so a lesson that shrank leaves
-    // them pointing past the end — and `build`'s `sublist` below throws where the
-    // message handler's try/catch cannot see it, giving a red error widget instead
-    // of the placeholder a broken draft is supposed to get. (Keying `_Visit` by
-    // `blockId` is the real fix; this stops it crashing.)
-    final last = widget.blocks.length - 1;
-    if (last < 0 || (_current <= last && _first <= last)) return;
+    // Cards deleted under the run: forget the visits to them, and if the current
+    // or the first card went, fall back to the latest place that still exists.
+    final ids = widget.blocks.map((b) => b.blockId).toSet();
+    final lostCurrent = !ids.contains(_currentId);
+    final lostFirst = !ids.contains(_firstId);
+    final before = _history.length;
+    _history.removeWhere((visit) => !ids.contains(visit.blockId));
+    if (_history.isEmpty) _history.add(_Visit(widget.blocks.first.blockId, 0));
+
+    // The current card lost the step it was on: re-mount it on the nearest one
+    // that is left, because the engine indexes its steps by position.
+    final current = _blockById(_currentId);
+    final shrunk = current != null && _shownStep >= current.steps.length;
+
+    if (!lostCurrent && !lostFirst && !shrunk && before == _history.length) return;
     setState(() {
-      _first = _first.clamp(0, last);
-      _current = _current.clamp(_first, last);
-      _history.removeWhere((visit) => visit.blockIndex > last);
-      if (_history.isEmpty) _history.add(_Visit(_current, 0));
-      _restore = null;
+      if (lostCurrent) _currentId = _history.last.blockId;
+      if (lostFirst) _firstId = _history.first.blockId;
+      if (_indexOf(_firstId) > _indexOf(_currentId)) _firstId = _currentId;
+      final block = _blockById(_currentId)!;
+      _restore = shrunk || lostCurrent
+          ? StepProgressData(
+              blockId: _currentId,
+              currentStepIndex: (lostCurrent ? _history.last.stepIndex : _shownStep)
+                  .clamp(0, block.steps.isEmpty ? 0 : block.steps.length - 1),
+            )
+          : _restore;
       _generation++;
     });
     _reportNavState();
@@ -133,25 +173,45 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
     super.dispose();
   }
 
-  int _indexOfStart() {
-    if (widget.startBlockId == null) return 0;
-    final index = widget.blocks.indexWhere((b) => b.blockId == widget.startBlockId);
-    return index < 0 ? 0 : index;
+  int _indexOf(String blockId) => widget.blocks.indexWhere((b) => b.blockId == blockId);
+
+  ContentBlock? _blockById(String blockId) {
+    for (final block in widget.blocks) {
+      if (block.blockId == blockId) return block;
+    }
+    return null;
+  }
+
+  String _startId() {
+    final start = widget.startBlockId;
+    if (start != null && _indexOf(start) >= 0) return start;
+    return widget.blocks.isEmpty ? '' : widget.blocks.first.blockId;
   }
 
   bool get canGoBack => _history.length > 1;
 
   void _reportNavState() => widget.onNavState(canGoBack);
 
-  /// Start the lesson again from the card the editor has selected.
+  /// Tell the editor which step is on screen, unless it already knows.
+  void _reportPosition(String blockId, int stepIndex) {
+    final block = _blockById(blockId);
+    if (block == null || stepIndex < 0 || stepIndex >= block.steps.length) return;
+    final visit = _Visit(blockId, stepIndex);
+    if (visit == _reported) return;
+    _reported = visit;
+    widget.onStepChanged(blockId, block.steps[stepIndex].stepId);
+  }
+
+  /// Start the lesson again from the card the run started on.
   void restart() {
     setState(() {
-      _first = _indexOfStart();
-      _current = _first;
+      _firstId = _startId();
+      _currentId = _firstId;
       _history
         ..clear()
-        ..add(_Visit(_current, 0));
+        ..add(_Visit(_currentId, 0));
       _restore = null;
+      _reported = null;
       _generation++;
     });
     _reportNavState();
@@ -168,11 +228,9 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
     _history.removeLast();
     final target = _history.last;
     setState(() {
-      _current = target.blockIndex;
-      _restore = StepProgressData(
-        blockId: widget.blocks[target.blockIndex].blockId,
-        currentStepIndex: target.stepIndex,
-      );
+      _currentId = target.blockId;
+      if (_indexOf(_firstId) > _indexOf(_currentId)) _firstId = _currentId;
+      _restore = StepProgressData(blockId: target.blockId, currentStepIndex: target.stepIndex);
       _generation++;
     });
     _reportNavState();
@@ -186,13 +244,14 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
   }
 
   void _advance() {
-    if (_current + 1 >= widget.blocks.length) return;
+    final next = _indexOf(_currentId) + 1;
+    if (next <= 0 || next >= widget.blocks.length) return;
     setState(() {
-      _current++;
+      _currentId = widget.blocks[next].blockId;
       _restore = null;
       _generation++;
     });
-    _recordVisit(_Visit(_current, 0));
+    _recordVisit(_Visit(_currentId, 0));
     _scrollToCurrent();
   }
 
@@ -200,18 +259,18 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
   /// it does here too — otherwise the branching an author most wants to test is the
   /// one thing the preview cannot show.
   void _jumpTo(String blockId) {
-    final index = widget.blocks.indexWhere((b) => b.blockId == blockId);
-    if (index < 0) {
+    if (_indexOf(blockId) < 0) {
       // Not in this lesson: tell the editor, which will select the card.
       widget.onRefTapped(PreviewRef(blockId: blockId));
       return;
     }
     setState(() {
-      _current = index;
+      _currentId = blockId;
+      if (_indexOf(_firstId) > _indexOf(_currentId)) _firstId = _currentId;
       _restore = null;
       _generation++;
     });
-    _recordVisit(_Visit(_current, 0));
+    _recordVisit(_Visit(_currentId, 0));
     _scrollToCurrent();
   }
 
@@ -232,11 +291,12 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
       return const Center(child: Text('Lekce zatím nemá žádné karty.'));
     }
 
-    // Clamped again at the point of use: `didUpdateWidget` catches a shrinking
-    // lesson, but a build can also run from a `setState` that raced it.
+    // Resolved at the point of use: `didUpdateWidget` repairs a lesson that lost
+    // cards, but a build can also run from a `setState` that raced it.
     final last = widget.blocks.length - 1;
-    final from = _first.clamp(0, last);
-    final visible = widget.blocks.sublist(from, _current.clamp(from, last) + 1);
+    final current = _indexOf(_currentId).clamp(0, last);
+    final from = _indexOf(_firstId).clamp(0, current);
+    final visible = widget.blocks.sublist(from, current + 1);
 
     return ListView.separated(
       controller: _scroll,
@@ -244,14 +304,14 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
       itemCount: visible.length,
       separatorBuilder: (_, _) => const SizedBox(height: 16),
       itemBuilder: (context, index) {
-        final blockIndex = from + index;
-        final block = widget.blocks[blockIndex];
-        final isCurrent = blockIndex == _current;
+        final block = visible[index];
+        final isCurrent = from + index == current;
 
         return PreviewScope(
           mode: PreviewMode(
             enabled: true,
-            // The whole point of this mode: every control works.
+            // The whole point of this mode: every control works, and taps belong
+            // to them rather than to click-to-edit.
             interactive: true,
             blockId: block.blockId,
             lessonId: widget.lessonId,
@@ -265,19 +325,22 @@ class PreviewLessonPlayerState extends State<PreviewLessonPlayer> {
             exportMode: widget.exportMode,
             isCurrent: isCurrent,
             isCompleted: !isCurrent,
+            hasHint: block.hasHint,
+            onHintRequested: block.hasHint ? () => showPreviewHint(context, block) : null,
             onBlockCompleted: ({int earnedXp = 0, double scoreKoef = 1.0, String? mark}) {
               widget.onCompleted(xp: earnedXp, scoreKoef: scoreKoef, mark: mark);
               _advance();
             },
             onStepProgress: (progress) {
               if (!isCurrent) return;
-              _recordVisit(_Visit(blockIndex, progress.currentStepIndex));
-              final steps = block.steps;
-              final at = progress.currentStepIndex;
-              if (at >= 0 && at < steps.length) {
-                widget.onStepChanged(block.blockId, steps[at].stepId);
-              }
+              _recordVisit(_Visit(block.blockId, progress.currentStepIndex));
             },
+            onStepShown: isCurrent
+                ? (stepIndex) {
+                    _shownStep = stepIndex;
+                    _reportPosition(block.blockId, stepIndex);
+                  }
+                : null,
             onCrossBlockNavigate: _jumpTo,
             onChatRequested: () {},
             savedProgress: isCurrent ? _restore : null,

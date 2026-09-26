@@ -1,7 +1,11 @@
 // The message channel between the editor and the embedded player.
 //
-//   editor → player: setBlock, setLesson, highlight, reset
-//   player → editor: ready, stepChanged, clicked, completed
+//   editor → player: setBlock, setLesson, highlight, back, restart, reset
+//   player → editor: ready, stepChanged, clicked, completed, navState
+//
+// What each carries, and *when* each is sent, is in `README.md` → "The contract".
+// The when matters as much as the what: the editor follows a run from
+// `stepChanged`, so a move that forgets to send it is a bug the editor shows.
 //
 // The interface lives here so that both implementations can see it; the
 // conditional import picks which one `buildPreviewChannel` comes from. Web is the
