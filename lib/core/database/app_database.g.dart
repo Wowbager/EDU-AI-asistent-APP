@@ -93,6 +93,21 @@ class $CoursesTableTable extends CoursesTable
     requiredDuringInsert: false,
     defaultValue: const Constant('{}'),
   );
+  static const VerificationMeta _onlyOnceMeta = const VerificationMeta(
+    'onlyOnce',
+  );
+  @override
+  late final GeneratedColumn<bool> onlyOnce = GeneratedColumn<bool>(
+    'only_once',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("only_once" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
   static const VerificationMeta _syncStatusMeta = const VerificationMeta(
     'syncStatus',
   );
@@ -151,6 +166,7 @@ class $CoursesTableTable extends CoursesTable
     status,
     language,
     data,
+    onlyOnce,
     syncStatus,
     createdAt,
     updatedAt,
@@ -217,6 +233,12 @@ class $CoursesTableTable extends CoursesTable
       context.handle(
         _dataMeta,
         this.data.isAcceptableOrUnknown(data['data']!, _dataMeta),
+      );
+    }
+    if (data.containsKey('only_once')) {
+      context.handle(
+        _onlyOnceMeta,
+        onlyOnce.isAcceptableOrUnknown(data['only_once']!, _onlyOnceMeta),
       );
     }
     if (data.containsKey('sync_status')) {
@@ -287,6 +309,10 @@ class $CoursesTableTable extends CoursesTable
         DriftSqlType.string,
         data['${effectivePrefix}data'],
       )!,
+      onlyOnce: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}only_once'],
+      )!,
       syncStatus: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}sync_status'],
@@ -338,6 +364,15 @@ class CoursesTableData extends DataClass
   /// JSON-encoded course data (lessons, exercises, etc.).
   final String data;
 
+  /// Course-level "only once" flag (typically a test): the course cannot be
+  /// re-entered after completion and none of its blocks may feed practice.
+  ///
+  /// Denormalised out of [data] on write (see `AppDatabase.upsertCourse`) so
+  /// the practice queue can filter on it with a two-column lookup instead of
+  /// decoding every course JSON — a course blob carries its blocks and can run
+  /// to megabytes (BR-E495XK).
+  final bool onlyOnce;
+
   /// Sync status: 0=synced, 1=pending, 2=conflict.
   final int syncStatus;
 
@@ -358,6 +393,7 @@ class CoursesTableData extends DataClass
     required this.status,
     required this.language,
     required this.data,
+    required this.onlyOnce,
     required this.syncStatus,
     required this.createdAt,
     required this.updatedAt,
@@ -376,6 +412,7 @@ class CoursesTableData extends DataClass
     map['status'] = Variable<String>(status);
     map['language'] = Variable<String>(language);
     map['data'] = Variable<String>(data);
+    map['only_once'] = Variable<bool>(onlyOnce);
     map['sync_status'] = Variable<int>(syncStatus);
     map['created_at'] = Variable<DateTime>(createdAt);
     map['updated_at'] = Variable<DateTime>(updatedAt);
@@ -397,6 +434,7 @@ class CoursesTableData extends DataClass
       status: Value(status),
       language: Value(language),
       data: Value(data),
+      onlyOnce: Value(onlyOnce),
       syncStatus: Value(syncStatus),
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
@@ -420,6 +458,7 @@ class CoursesTableData extends DataClass
       status: serializer.fromJson<String>(json['status']),
       language: serializer.fromJson<String>(json['language']),
       data: serializer.fromJson<String>(json['data']),
+      onlyOnce: serializer.fromJson<bool>(json['onlyOnce']),
       syncStatus: serializer.fromJson<int>(json['syncStatus']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
@@ -438,6 +477,7 @@ class CoursesTableData extends DataClass
       'status': serializer.toJson<String>(status),
       'language': serializer.toJson<String>(language),
       'data': serializer.toJson<String>(data),
+      'onlyOnce': serializer.toJson<bool>(onlyOnce),
       'syncStatus': serializer.toJson<int>(syncStatus),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'updatedAt': serializer.toJson<DateTime>(updatedAt),
@@ -454,6 +494,7 @@ class CoursesTableData extends DataClass
     String? status,
     String? language,
     String? data,
+    bool? onlyOnce,
     int? syncStatus,
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -467,6 +508,7 @@ class CoursesTableData extends DataClass
     status: status ?? this.status,
     language: language ?? this.language,
     data: data ?? this.data,
+    onlyOnce: onlyOnce ?? this.onlyOnce,
     syncStatus: syncStatus ?? this.syncStatus,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
@@ -484,6 +526,7 @@ class CoursesTableData extends DataClass
       status: data.status.present ? data.status.value : this.status,
       language: data.language.present ? data.language.value : this.language,
       data: data.data.present ? data.data.value : this.data,
+      onlyOnce: data.onlyOnce.present ? data.onlyOnce.value : this.onlyOnce,
       syncStatus: data.syncStatus.present
           ? data.syncStatus.value
           : this.syncStatus,
@@ -506,6 +549,7 @@ class CoursesTableData extends DataClass
           ..write('status: $status, ')
           ..write('language: $language, ')
           ..write('data: $data, ')
+          ..write('onlyOnce: $onlyOnce, ')
           ..write('syncStatus: $syncStatus, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
@@ -524,6 +568,7 @@ class CoursesTableData extends DataClass
     status,
     language,
     data,
+    onlyOnce,
     syncStatus,
     createdAt,
     updatedAt,
@@ -541,6 +586,7 @@ class CoursesTableData extends DataClass
           other.status == this.status &&
           other.language == this.language &&
           other.data == this.data &&
+          other.onlyOnce == this.onlyOnce &&
           other.syncStatus == this.syncStatus &&
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt &&
@@ -556,6 +602,7 @@ class CoursesTableCompanion extends UpdateCompanion<CoursesTableData> {
   final Value<String> status;
   final Value<String> language;
   final Value<String> data;
+  final Value<bool> onlyOnce;
   final Value<int> syncStatus;
   final Value<DateTime> createdAt;
   final Value<DateTime> updatedAt;
@@ -570,6 +617,7 @@ class CoursesTableCompanion extends UpdateCompanion<CoursesTableData> {
     this.status = const Value.absent(),
     this.language = const Value.absent(),
     this.data = const Value.absent(),
+    this.onlyOnce = const Value.absent(),
     this.syncStatus = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
@@ -585,6 +633,7 @@ class CoursesTableCompanion extends UpdateCompanion<CoursesTableData> {
     this.status = const Value.absent(),
     this.language = const Value.absent(),
     this.data = const Value.absent(),
+    this.onlyOnce = const Value.absent(),
     this.syncStatus = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
@@ -602,6 +651,7 @@ class CoursesTableCompanion extends UpdateCompanion<CoursesTableData> {
     Expression<String>? status,
     Expression<String>? language,
     Expression<String>? data,
+    Expression<bool>? onlyOnce,
     Expression<int>? syncStatus,
     Expression<DateTime>? createdAt,
     Expression<DateTime>? updatedAt,
@@ -617,6 +667,7 @@ class CoursesTableCompanion extends UpdateCompanion<CoursesTableData> {
       if (status != null) 'status': status,
       if (language != null) 'language': language,
       if (data != null) 'data': data,
+      if (onlyOnce != null) 'only_once': onlyOnce,
       if (syncStatus != null) 'sync_status': syncStatus,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
@@ -634,6 +685,7 @@ class CoursesTableCompanion extends UpdateCompanion<CoursesTableData> {
     Value<String>? status,
     Value<String>? language,
     Value<String>? data,
+    Value<bool>? onlyOnce,
     Value<int>? syncStatus,
     Value<DateTime>? createdAt,
     Value<DateTime>? updatedAt,
@@ -649,6 +701,7 @@ class CoursesTableCompanion extends UpdateCompanion<CoursesTableData> {
       status: status ?? this.status,
       language: language ?? this.language,
       data: data ?? this.data,
+      onlyOnce: onlyOnce ?? this.onlyOnce,
       syncStatus: syncStatus ?? this.syncStatus,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -684,6 +737,9 @@ class CoursesTableCompanion extends UpdateCompanion<CoursesTableData> {
     if (data.present) {
       map['data'] = Variable<String>(data.value);
     }
+    if (onlyOnce.present) {
+      map['only_once'] = Variable<bool>(onlyOnce.value);
+    }
     if (syncStatus.present) {
       map['sync_status'] = Variable<int>(syncStatus.value);
     }
@@ -713,6 +769,7 @@ class CoursesTableCompanion extends UpdateCompanion<CoursesTableData> {
           ..write('status: $status, ')
           ..write('language: $language, ')
           ..write('data: $data, ')
+          ..write('onlyOnce: $onlyOnce, ')
           ..write('syncStatus: $syncStatus, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
@@ -4787,6 +4844,30 @@ class $UserStatsTableTable extends UserStatsTable
     requiredDuringInsert: false,
     defaultValue: const Constant(0),
   );
+  static const VerificationMeta _coinsEarnedMeta = const VerificationMeta(
+    'coinsEarned',
+  );
+  @override
+  late final GeneratedColumn<int> coinsEarned = GeneratedColumn<int>(
+    'coins_earned',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _coinsBalanceMeta = const VerificationMeta(
+    'coinsBalance',
+  );
+  @override
+  late final GeneratedColumn<int> coinsBalance = GeneratedColumn<int>(
+    'coins_balance',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
   static const VerificationMeta _syncStatusMeta = const VerificationMeta(
     'syncStatus',
   );
@@ -4848,6 +4929,8 @@ class $UserStatsTableTable extends UserStatsTable
     lastStreakDate,
     dailyXpDate,
     dailyXpAmount,
+    coinsEarned,
+    coinsBalance,
     syncStatus,
     createdAt,
     updatedAt,
@@ -4947,6 +5030,24 @@ class $UserStatsTableTable extends UserStatsTable
         ),
       );
     }
+    if (data.containsKey('coins_earned')) {
+      context.handle(
+        _coinsEarnedMeta,
+        coinsEarned.isAcceptableOrUnknown(
+          data['coins_earned']!,
+          _coinsEarnedMeta,
+        ),
+      );
+    }
+    if (data.containsKey('coins_balance')) {
+      context.handle(
+        _coinsBalanceMeta,
+        coinsBalance.isAcceptableOrUnknown(
+          data['coins_balance']!,
+          _coinsBalanceMeta,
+        ),
+      );
+    }
     if (data.containsKey('sync_status')) {
       context.handle(
         _syncStatusMeta,
@@ -5027,6 +5128,14 @@ class $UserStatsTableTable extends UserStatsTable
         DriftSqlType.int,
         data['${effectivePrefix}daily_xp_amount'],
       )!,
+      coinsEarned: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}coins_earned'],
+      )!,
+      coinsBalance: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}coins_balance'],
+      )!,
       syncStatus: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}sync_status'],
@@ -5087,6 +5196,14 @@ class UserStatsTableData extends DataClass
   /// XP earned on the [dailyXpDate] (resets each new day).
   final int dailyXpAmount;
 
+  /// EDUX coins earned over the account's lifetime — the number the
+  /// Achievements screen shows. Only ever grows (BR-HK9828).
+  final int coinsEarned;
+
+  /// EDUX coins still available to spend. Tracked apart from [coinsEarned] so
+  /// buying something in the shop cannot shrink what the student has earned.
+  final int coinsBalance;
+
   /// Sync status: 0=synced, 1=pending, 2=conflict.
   final int syncStatus;
 
@@ -5110,6 +5227,8 @@ class UserStatsTableData extends DataClass
     this.lastStreakDate,
     this.dailyXpDate,
     required this.dailyXpAmount,
+    required this.coinsEarned,
+    required this.coinsBalance,
     required this.syncStatus,
     required this.createdAt,
     required this.updatedAt,
@@ -5135,6 +5254,8 @@ class UserStatsTableData extends DataClass
       map['daily_xp_date'] = Variable<DateTime>(dailyXpDate);
     }
     map['daily_xp_amount'] = Variable<int>(dailyXpAmount);
+    map['coins_earned'] = Variable<int>(coinsEarned);
+    map['coins_balance'] = Variable<int>(coinsBalance);
     map['sync_status'] = Variable<int>(syncStatus);
     map['created_at'] = Variable<DateTime>(createdAt);
     map['updated_at'] = Variable<DateTime>(updatedAt);
@@ -5163,6 +5284,8 @@ class UserStatsTableData extends DataClass
           ? const Value.absent()
           : Value(dailyXpDate),
       dailyXpAmount: Value(dailyXpAmount),
+      coinsEarned: Value(coinsEarned),
+      coinsBalance: Value(coinsBalance),
       syncStatus: Value(syncStatus),
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
@@ -5189,6 +5312,8 @@ class UserStatsTableData extends DataClass
       lastStreakDate: serializer.fromJson<DateTime?>(json['lastStreakDate']),
       dailyXpDate: serializer.fromJson<DateTime?>(json['dailyXpDate']),
       dailyXpAmount: serializer.fromJson<int>(json['dailyXpAmount']),
+      coinsEarned: serializer.fromJson<int>(json['coinsEarned']),
+      coinsBalance: serializer.fromJson<int>(json['coinsBalance']),
       syncStatus: serializer.fromJson<int>(json['syncStatus']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
@@ -5210,6 +5335,8 @@ class UserStatsTableData extends DataClass
       'lastStreakDate': serializer.toJson<DateTime?>(lastStreakDate),
       'dailyXpDate': serializer.toJson<DateTime?>(dailyXpDate),
       'dailyXpAmount': serializer.toJson<int>(dailyXpAmount),
+      'coinsEarned': serializer.toJson<int>(coinsEarned),
+      'coinsBalance': serializer.toJson<int>(coinsBalance),
       'syncStatus': serializer.toJson<int>(syncStatus),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'updatedAt': serializer.toJson<DateTime>(updatedAt),
@@ -5229,6 +5356,8 @@ class UserStatsTableData extends DataClass
     Value<DateTime?> lastStreakDate = const Value.absent(),
     Value<DateTime?> dailyXpDate = const Value.absent(),
     int? dailyXpAmount,
+    int? coinsEarned,
+    int? coinsBalance,
     int? syncStatus,
     DateTime? createdAt,
     DateTime? updatedAt,
@@ -5247,6 +5376,8 @@ class UserStatsTableData extends DataClass
         : this.lastStreakDate,
     dailyXpDate: dailyXpDate.present ? dailyXpDate.value : this.dailyXpDate,
     dailyXpAmount: dailyXpAmount ?? this.dailyXpAmount,
+    coinsEarned: coinsEarned ?? this.coinsEarned,
+    coinsBalance: coinsBalance ?? this.coinsBalance,
     syncStatus: syncStatus ?? this.syncStatus,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
@@ -5279,6 +5410,12 @@ class UserStatsTableData extends DataClass
       dailyXpAmount: data.dailyXpAmount.present
           ? data.dailyXpAmount.value
           : this.dailyXpAmount,
+      coinsEarned: data.coinsEarned.present
+          ? data.coinsEarned.value
+          : this.coinsEarned,
+      coinsBalance: data.coinsBalance.present
+          ? data.coinsBalance.value
+          : this.coinsBalance,
       syncStatus: data.syncStatus.present
           ? data.syncStatus.value
           : this.syncStatus,
@@ -5304,6 +5441,8 @@ class UserStatsTableData extends DataClass
           ..write('lastStreakDate: $lastStreakDate, ')
           ..write('dailyXpDate: $dailyXpDate, ')
           ..write('dailyXpAmount: $dailyXpAmount, ')
+          ..write('coinsEarned: $coinsEarned, ')
+          ..write('coinsBalance: $coinsBalance, ')
           ..write('syncStatus: $syncStatus, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
@@ -5325,6 +5464,8 @@ class UserStatsTableData extends DataClass
     lastStreakDate,
     dailyXpDate,
     dailyXpAmount,
+    coinsEarned,
+    coinsBalance,
     syncStatus,
     createdAt,
     updatedAt,
@@ -5345,6 +5486,8 @@ class UserStatsTableData extends DataClass
           other.lastStreakDate == this.lastStreakDate &&
           other.dailyXpDate == this.dailyXpDate &&
           other.dailyXpAmount == this.dailyXpAmount &&
+          other.coinsEarned == this.coinsEarned &&
+          other.coinsBalance == this.coinsBalance &&
           other.syncStatus == this.syncStatus &&
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt &&
@@ -5363,6 +5506,8 @@ class UserStatsTableCompanion extends UpdateCompanion<UserStatsTableData> {
   final Value<DateTime?> lastStreakDate;
   final Value<DateTime?> dailyXpDate;
   final Value<int> dailyXpAmount;
+  final Value<int> coinsEarned;
+  final Value<int> coinsBalance;
   final Value<int> syncStatus;
   final Value<DateTime> createdAt;
   final Value<DateTime> updatedAt;
@@ -5380,6 +5525,8 @@ class UserStatsTableCompanion extends UpdateCompanion<UserStatsTableData> {
     this.lastStreakDate = const Value.absent(),
     this.dailyXpDate = const Value.absent(),
     this.dailyXpAmount = const Value.absent(),
+    this.coinsEarned = const Value.absent(),
+    this.coinsBalance = const Value.absent(),
     this.syncStatus = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
@@ -5398,6 +5545,8 @@ class UserStatsTableCompanion extends UpdateCompanion<UserStatsTableData> {
     this.lastStreakDate = const Value.absent(),
     this.dailyXpDate = const Value.absent(),
     this.dailyXpAmount = const Value.absent(),
+    this.coinsEarned = const Value.absent(),
+    this.coinsBalance = const Value.absent(),
     this.syncStatus = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
@@ -5417,6 +5566,8 @@ class UserStatsTableCompanion extends UpdateCompanion<UserStatsTableData> {
     Expression<DateTime>? lastStreakDate,
     Expression<DateTime>? dailyXpDate,
     Expression<int>? dailyXpAmount,
+    Expression<int>? coinsEarned,
+    Expression<int>? coinsBalance,
     Expression<int>? syncStatus,
     Expression<DateTime>? createdAt,
     Expression<DateTime>? updatedAt,
@@ -5435,6 +5586,8 @@ class UserStatsTableCompanion extends UpdateCompanion<UserStatsTableData> {
       if (lastStreakDate != null) 'last_streak_date': lastStreakDate,
       if (dailyXpDate != null) 'daily_xp_date': dailyXpDate,
       if (dailyXpAmount != null) 'daily_xp_amount': dailyXpAmount,
+      if (coinsEarned != null) 'coins_earned': coinsEarned,
+      if (coinsBalance != null) 'coins_balance': coinsBalance,
       if (syncStatus != null) 'sync_status': syncStatus,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
@@ -5455,6 +5608,8 @@ class UserStatsTableCompanion extends UpdateCompanion<UserStatsTableData> {
     Value<DateTime?>? lastStreakDate,
     Value<DateTime?>? dailyXpDate,
     Value<int>? dailyXpAmount,
+    Value<int>? coinsEarned,
+    Value<int>? coinsBalance,
     Value<int>? syncStatus,
     Value<DateTime>? createdAt,
     Value<DateTime>? updatedAt,
@@ -5473,6 +5628,8 @@ class UserStatsTableCompanion extends UpdateCompanion<UserStatsTableData> {
       lastStreakDate: lastStreakDate ?? this.lastStreakDate,
       dailyXpDate: dailyXpDate ?? this.dailyXpDate,
       dailyXpAmount: dailyXpAmount ?? this.dailyXpAmount,
+      coinsEarned: coinsEarned ?? this.coinsEarned,
+      coinsBalance: coinsBalance ?? this.coinsBalance,
       syncStatus: syncStatus ?? this.syncStatus,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -5517,6 +5674,12 @@ class UserStatsTableCompanion extends UpdateCompanion<UserStatsTableData> {
     if (dailyXpAmount.present) {
       map['daily_xp_amount'] = Variable<int>(dailyXpAmount.value);
     }
+    if (coinsEarned.present) {
+      map['coins_earned'] = Variable<int>(coinsEarned.value);
+    }
+    if (coinsBalance.present) {
+      map['coins_balance'] = Variable<int>(coinsBalance.value);
+    }
     if (syncStatus.present) {
       map['sync_status'] = Variable<int>(syncStatus.value);
     }
@@ -5549,6 +5712,8 @@ class UserStatsTableCompanion extends UpdateCompanion<UserStatsTableData> {
           ..write('lastStreakDate: $lastStreakDate, ')
           ..write('dailyXpDate: $dailyXpDate, ')
           ..write('dailyXpAmount: $dailyXpAmount, ')
+          ..write('coinsEarned: $coinsEarned, ')
+          ..write('coinsBalance: $coinsBalance, ')
           ..write('syncStatus: $syncStatus, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
@@ -7204,6 +7369,17 @@ class $BlockStatsTableTable extends BlockStatsTable
     type: DriftSqlType.string,
     requiredDuringInsert: true,
   );
+  static const VerificationMeta _courseIdMeta = const VerificationMeta(
+    'courseId',
+  );
+  @override
+  late final GeneratedColumn<String> courseId = GeneratedColumn<String>(
+    'course_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _updatedAtMeta = const VerificationMeta(
     'updatedAt',
   );
@@ -7221,6 +7397,7 @@ class $BlockStatsTableTable extends BlockStatsTable
     blockId,
     itemPocet,
     eloVector,
+    courseId,
     updatedAt,
   ];
   @override
@@ -7259,6 +7436,12 @@ class $BlockStatsTableTable extends BlockStatsTable
     } else if (isInserting) {
       context.missing(_eloVectorMeta);
     }
+    if (data.containsKey('course_id')) {
+      context.handle(
+        _courseIdMeta,
+        courseId.isAcceptableOrUnknown(data['course_id']!, _courseIdMeta),
+      );
+    }
     if (data.containsKey('updated_at')) {
       context.handle(
         _updatedAtMeta,
@@ -7286,6 +7469,10 @@ class $BlockStatsTableTable extends BlockStatsTable
         DriftSqlType.string,
         data['${effectivePrefix}elo_vector'],
       )!,
+      courseId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}course_id'],
+      ),
       updatedAt: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}updated_at'],
@@ -7304,11 +7491,18 @@ class BlockStatsTableData extends DataClass
   final String blockId;
   final String itemPocet;
   final String eloVector;
+
+  /// The downloaded course whose pull wrote this row — the per-course cursor
+  /// of the next pull. Null on rows from before schema 21 (none survive it).
+  final String? courseId;
+
+  /// The server's `updated_at` for the row.
   final DateTime updatedAt;
   const BlockStatsTableData({
     required this.blockId,
     required this.itemPocet,
     required this.eloVector,
+    this.courseId,
     required this.updatedAt,
   });
   @override
@@ -7317,6 +7511,9 @@ class BlockStatsTableData extends DataClass
     map['block_id'] = Variable<String>(blockId);
     map['item_pocet'] = Variable<String>(itemPocet);
     map['elo_vector'] = Variable<String>(eloVector);
+    if (!nullToAbsent || courseId != null) {
+      map['course_id'] = Variable<String>(courseId);
+    }
     map['updated_at'] = Variable<DateTime>(updatedAt);
     return map;
   }
@@ -7326,6 +7523,9 @@ class BlockStatsTableData extends DataClass
       blockId: Value(blockId),
       itemPocet: Value(itemPocet),
       eloVector: Value(eloVector),
+      courseId: courseId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(courseId),
       updatedAt: Value(updatedAt),
     );
   }
@@ -7339,6 +7539,7 @@ class BlockStatsTableData extends DataClass
       blockId: serializer.fromJson<String>(json['blockId']),
       itemPocet: serializer.fromJson<String>(json['itemPocet']),
       eloVector: serializer.fromJson<String>(json['eloVector']),
+      courseId: serializer.fromJson<String?>(json['courseId']),
       updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
     );
   }
@@ -7349,6 +7550,7 @@ class BlockStatsTableData extends DataClass
       'blockId': serializer.toJson<String>(blockId),
       'itemPocet': serializer.toJson<String>(itemPocet),
       'eloVector': serializer.toJson<String>(eloVector),
+      'courseId': serializer.toJson<String?>(courseId),
       'updatedAt': serializer.toJson<DateTime>(updatedAt),
     };
   }
@@ -7357,11 +7559,13 @@ class BlockStatsTableData extends DataClass
     String? blockId,
     String? itemPocet,
     String? eloVector,
+    Value<String?> courseId = const Value.absent(),
     DateTime? updatedAt,
   }) => BlockStatsTableData(
     blockId: blockId ?? this.blockId,
     itemPocet: itemPocet ?? this.itemPocet,
     eloVector: eloVector ?? this.eloVector,
+    courseId: courseId.present ? courseId.value : this.courseId,
     updatedAt: updatedAt ?? this.updatedAt,
   );
   BlockStatsTableData copyWithCompanion(BlockStatsTableCompanion data) {
@@ -7369,6 +7573,7 @@ class BlockStatsTableData extends DataClass
       blockId: data.blockId.present ? data.blockId.value : this.blockId,
       itemPocet: data.itemPocet.present ? data.itemPocet.value : this.itemPocet,
       eloVector: data.eloVector.present ? data.eloVector.value : this.eloVector,
+      courseId: data.courseId.present ? data.courseId.value : this.courseId,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
     );
   }
@@ -7379,13 +7584,15 @@ class BlockStatsTableData extends DataClass
           ..write('blockId: $blockId, ')
           ..write('itemPocet: $itemPocet, ')
           ..write('eloVector: $eloVector, ')
+          ..write('courseId: $courseId, ')
           ..write('updatedAt: $updatedAt')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(blockId, itemPocet, eloVector, updatedAt);
+  int get hashCode =>
+      Object.hash(blockId, itemPocet, eloVector, courseId, updatedAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -7393,6 +7600,7 @@ class BlockStatsTableData extends DataClass
           other.blockId == this.blockId &&
           other.itemPocet == this.itemPocet &&
           other.eloVector == this.eloVector &&
+          other.courseId == this.courseId &&
           other.updatedAt == this.updatedAt);
 }
 
@@ -7400,12 +7608,14 @@ class BlockStatsTableCompanion extends UpdateCompanion<BlockStatsTableData> {
   final Value<String> blockId;
   final Value<String> itemPocet;
   final Value<String> eloVector;
+  final Value<String?> courseId;
   final Value<DateTime> updatedAt;
   final Value<int> rowid;
   const BlockStatsTableCompanion({
     this.blockId = const Value.absent(),
     this.itemPocet = const Value.absent(),
     this.eloVector = const Value.absent(),
+    this.courseId = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
@@ -7413,6 +7623,7 @@ class BlockStatsTableCompanion extends UpdateCompanion<BlockStatsTableData> {
     required String blockId,
     required String itemPocet,
     required String eloVector,
+    this.courseId = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : blockId = Value(blockId),
@@ -7422,6 +7633,7 @@ class BlockStatsTableCompanion extends UpdateCompanion<BlockStatsTableData> {
     Expression<String>? blockId,
     Expression<String>? itemPocet,
     Expression<String>? eloVector,
+    Expression<String>? courseId,
     Expression<DateTime>? updatedAt,
     Expression<int>? rowid,
   }) {
@@ -7429,6 +7641,7 @@ class BlockStatsTableCompanion extends UpdateCompanion<BlockStatsTableData> {
       if (blockId != null) 'block_id': blockId,
       if (itemPocet != null) 'item_pocet': itemPocet,
       if (eloVector != null) 'elo_vector': eloVector,
+      if (courseId != null) 'course_id': courseId,
       if (updatedAt != null) 'updated_at': updatedAt,
       if (rowid != null) 'rowid': rowid,
     });
@@ -7438,6 +7651,7 @@ class BlockStatsTableCompanion extends UpdateCompanion<BlockStatsTableData> {
     Value<String>? blockId,
     Value<String>? itemPocet,
     Value<String>? eloVector,
+    Value<String?>? courseId,
     Value<DateTime>? updatedAt,
     Value<int>? rowid,
   }) {
@@ -7445,6 +7659,7 @@ class BlockStatsTableCompanion extends UpdateCompanion<BlockStatsTableData> {
       blockId: blockId ?? this.blockId,
       itemPocet: itemPocet ?? this.itemPocet,
       eloVector: eloVector ?? this.eloVector,
+      courseId: courseId ?? this.courseId,
       updatedAt: updatedAt ?? this.updatedAt,
       rowid: rowid ?? this.rowid,
     );
@@ -7462,6 +7677,9 @@ class BlockStatsTableCompanion extends UpdateCompanion<BlockStatsTableData> {
     if (eloVector.present) {
       map['elo_vector'] = Variable<String>(eloVector.value);
     }
+    if (courseId.present) {
+      map['course_id'] = Variable<String>(courseId.value);
+    }
     if (updatedAt.present) {
       map['updated_at'] = Variable<DateTime>(updatedAt.value);
     }
@@ -7477,6 +7695,7 @@ class BlockStatsTableCompanion extends UpdateCompanion<BlockStatsTableData> {
           ..write('blockId: $blockId, ')
           ..write('itemPocet: $itemPocet, ')
           ..write('eloVector: $eloVector, ')
+          ..write('courseId: $courseId, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
@@ -12629,6 +12848,1330 @@ class GpfDimensionsTableCompanion
   }
 }
 
+class $AvatarItemsTableTable extends AvatarItemsTable
+    with TableInfo<$AvatarItemsTableTable, AvatarItemsTableData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $AvatarItemsTableTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _codeMeta = const VerificationMeta('code');
+  @override
+  late final GeneratedColumn<String> code = GeneratedColumn<String>(
+    'code',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _slotMeta = const VerificationMeta('slot');
+  @override
+  late final GeneratedColumn<String> slot = GeneratedColumn<String>(
+    'slot',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _layerMeta = const VerificationMeta('layer');
+  @override
+  late final GeneratedColumn<int> layer = GeneratedColumn<int>(
+    'layer',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _urlMeta = const VerificationMeta('url');
+  @override
+  late final GeneratedColumn<String> url = GeneratedColumn<String>(
+    'url',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _rarityMeta = const VerificationMeta('rarity');
+  @override
+  late final GeneratedColumn<String> rarity = GeneratedColumn<String>(
+    'rarity',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('common'),
+  );
+  static const VerificationMeta _priceMeta = const VerificationMeta('price');
+  @override
+  late final GeneratedColumn<int> price = GeneratedColumn<int>(
+    'price',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _isDefaultMeta = const VerificationMeta(
+    'isDefault',
+  );
+  @override
+  late final GeneratedColumn<bool> isDefault = GeneratedColumn<bool>(
+    'is_default',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_default" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _svgSourceMeta = const VerificationMeta(
+    'svgSource',
+  );
+  @override
+  late final GeneratedColumn<String> svgSource = GeneratedColumn<String>(
+    'svg_source',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _boundsLeftMeta = const VerificationMeta(
+    'boundsLeft',
+  );
+  @override
+  late final GeneratedColumn<double> boundsLeft = GeneratedColumn<double>(
+    'bounds_left',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _boundsTopMeta = const VerificationMeta(
+    'boundsTop',
+  );
+  @override
+  late final GeneratedColumn<double> boundsTop = GeneratedColumn<double>(
+    'bounds_top',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _boundsRightMeta = const VerificationMeta(
+    'boundsRight',
+  );
+  @override
+  late final GeneratedColumn<double> boundsRight = GeneratedColumn<double>(
+    'bounds_right',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _boundsBottomMeta = const VerificationMeta(
+    'boundsBottom',
+  );
+  @override
+  late final GeneratedColumn<double> boundsBottom = GeneratedColumn<double>(
+    'bounds_bottom',
+    aliasedName,
+    true,
+    type: DriftSqlType.double,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _serverUpdatedAtMeta = const VerificationMeta(
+    'serverUpdatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> serverUpdatedAt =
+      GeneratedColumn<DateTime>(
+        'server_updated_at',
+        aliasedName,
+        true,
+        type: DriftSqlType.dateTime,
+        requiredDuringInsert: false,
+      );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+    defaultValue: currentDateAndTime,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    code,
+    name,
+    slot,
+    layer,
+    url,
+    rarity,
+    price,
+    isDefault,
+    svgSource,
+    boundsLeft,
+    boundsTop,
+    boundsRight,
+    boundsBottom,
+    serverUpdatedAt,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'avatar_items';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<AvatarItemsTableData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('code')) {
+      context.handle(
+        _codeMeta,
+        code.isAcceptableOrUnknown(data['code']!, _codeMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_codeMeta);
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_nameMeta);
+    }
+    if (data.containsKey('slot')) {
+      context.handle(
+        _slotMeta,
+        slot.isAcceptableOrUnknown(data['slot']!, _slotMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_slotMeta);
+    }
+    if (data.containsKey('layer')) {
+      context.handle(
+        _layerMeta,
+        layer.isAcceptableOrUnknown(data['layer']!, _layerMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_layerMeta);
+    }
+    if (data.containsKey('url')) {
+      context.handle(
+        _urlMeta,
+        url.isAcceptableOrUnknown(data['url']!, _urlMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_urlMeta);
+    }
+    if (data.containsKey('rarity')) {
+      context.handle(
+        _rarityMeta,
+        rarity.isAcceptableOrUnknown(data['rarity']!, _rarityMeta),
+      );
+    }
+    if (data.containsKey('price')) {
+      context.handle(
+        _priceMeta,
+        price.isAcceptableOrUnknown(data['price']!, _priceMeta),
+      );
+    }
+    if (data.containsKey('is_default')) {
+      context.handle(
+        _isDefaultMeta,
+        isDefault.isAcceptableOrUnknown(data['is_default']!, _isDefaultMeta),
+      );
+    }
+    if (data.containsKey('svg_source')) {
+      context.handle(
+        _svgSourceMeta,
+        svgSource.isAcceptableOrUnknown(data['svg_source']!, _svgSourceMeta),
+      );
+    }
+    if (data.containsKey('bounds_left')) {
+      context.handle(
+        _boundsLeftMeta,
+        boundsLeft.isAcceptableOrUnknown(data['bounds_left']!, _boundsLeftMeta),
+      );
+    }
+    if (data.containsKey('bounds_top')) {
+      context.handle(
+        _boundsTopMeta,
+        boundsTop.isAcceptableOrUnknown(data['bounds_top']!, _boundsTopMeta),
+      );
+    }
+    if (data.containsKey('bounds_right')) {
+      context.handle(
+        _boundsRightMeta,
+        boundsRight.isAcceptableOrUnknown(
+          data['bounds_right']!,
+          _boundsRightMeta,
+        ),
+      );
+    }
+    if (data.containsKey('bounds_bottom')) {
+      context.handle(
+        _boundsBottomMeta,
+        boundsBottom.isAcceptableOrUnknown(
+          data['bounds_bottom']!,
+          _boundsBottomMeta,
+        ),
+      );
+    }
+    if (data.containsKey('server_updated_at')) {
+      context.handle(
+        _serverUpdatedAtMeta,
+        serverUpdatedAt.isAcceptableOrUnknown(
+          data['server_updated_at']!,
+          _serverUpdatedAtMeta,
+        ),
+      );
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {code};
+  @override
+  AvatarItemsTableData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return AvatarItemsTableData(
+      code: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}code'],
+      )!,
+      name: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name'],
+      )!,
+      slot: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}slot'],
+      )!,
+      layer: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}layer'],
+      )!,
+      url: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}url'],
+      )!,
+      rarity: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}rarity'],
+      )!,
+      price: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}price'],
+      )!,
+      isDefault: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_default'],
+      )!,
+      svgSource: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}svg_source'],
+      ),
+      boundsLeft: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}bounds_left'],
+      ),
+      boundsTop: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}bounds_top'],
+      ),
+      boundsRight: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}bounds_right'],
+      ),
+      boundsBottom: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}bounds_bottom'],
+      ),
+      serverUpdatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}server_updated_at'],
+      ),
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  $AvatarItemsTableTable createAlias(String alias) {
+    return $AvatarItemsTableTable(attachedDatabase, alias);
+  }
+}
+
+class AvatarItemsTableData extends DataClass
+    implements Insertable<AvatarItemsTableData> {
+  /// Server-side stable identifier ("head_zlata_korunka"). Primary key, so a
+  /// re-fetch reconciles in place instead of duplicating the catalog.
+  final String code;
+  final String name;
+
+  /// torso|legs|eyes|mouth|face|head|neck|hands|held
+  final String slot;
+
+  /// Paint order — items are drawn ascending.
+  final int layer;
+
+  /// R2 URL the artwork was downloaded from.
+  final String url;
+  final String rarity;
+
+  /// Always 0 while the shop is free; kept so enabling credits is a data change.
+  final int price;
+
+  /// Part of the free starting outfit — owned implicitly by everyone.
+  final bool isDefault;
+
+  /// The downloaded SVG. Null means "catalog row known, artwork not fetched
+  /// yet" — the item is listed but renders as a placeholder until a connection
+  /// fills this in.
+  final String? svgSource;
+
+  /// Tight bounding box of the artwork's visible content, normalised to the
+  /// shared canvas (0..1). Computed once when [svgSource] is cached.
+  ///
+  /// Assets are drawn where they belong on the body, so a crown is a small
+  /// patch near the top of an otherwise empty canvas. The stored geometry has
+  /// to stay that way for layering to work; these let the shop tile and the
+  /// preview crop to the artwork instead of rendering mostly nothing.
+  final double? boundsLeft;
+  final double? boundsTop;
+  final double? boundsRight;
+  final double? boundsBottom;
+
+  /// The catalog row's server timestamp. An admin replacing the artwork keeps
+  /// the same URL, so this is what tells us the cached [svgSource] is stale.
+  final DateTime? serverUpdatedAt;
+  final DateTime updatedAt;
+  const AvatarItemsTableData({
+    required this.code,
+    required this.name,
+    required this.slot,
+    required this.layer,
+    required this.url,
+    required this.rarity,
+    required this.price,
+    required this.isDefault,
+    this.svgSource,
+    this.boundsLeft,
+    this.boundsTop,
+    this.boundsRight,
+    this.boundsBottom,
+    this.serverUpdatedAt,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['code'] = Variable<String>(code);
+    map['name'] = Variable<String>(name);
+    map['slot'] = Variable<String>(slot);
+    map['layer'] = Variable<int>(layer);
+    map['url'] = Variable<String>(url);
+    map['rarity'] = Variable<String>(rarity);
+    map['price'] = Variable<int>(price);
+    map['is_default'] = Variable<bool>(isDefault);
+    if (!nullToAbsent || svgSource != null) {
+      map['svg_source'] = Variable<String>(svgSource);
+    }
+    if (!nullToAbsent || boundsLeft != null) {
+      map['bounds_left'] = Variable<double>(boundsLeft);
+    }
+    if (!nullToAbsent || boundsTop != null) {
+      map['bounds_top'] = Variable<double>(boundsTop);
+    }
+    if (!nullToAbsent || boundsRight != null) {
+      map['bounds_right'] = Variable<double>(boundsRight);
+    }
+    if (!nullToAbsent || boundsBottom != null) {
+      map['bounds_bottom'] = Variable<double>(boundsBottom);
+    }
+    if (!nullToAbsent || serverUpdatedAt != null) {
+      map['server_updated_at'] = Variable<DateTime>(serverUpdatedAt);
+    }
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    return map;
+  }
+
+  AvatarItemsTableCompanion toCompanion(bool nullToAbsent) {
+    return AvatarItemsTableCompanion(
+      code: Value(code),
+      name: Value(name),
+      slot: Value(slot),
+      layer: Value(layer),
+      url: Value(url),
+      rarity: Value(rarity),
+      price: Value(price),
+      isDefault: Value(isDefault),
+      svgSource: svgSource == null && nullToAbsent
+          ? const Value.absent()
+          : Value(svgSource),
+      boundsLeft: boundsLeft == null && nullToAbsent
+          ? const Value.absent()
+          : Value(boundsLeft),
+      boundsTop: boundsTop == null && nullToAbsent
+          ? const Value.absent()
+          : Value(boundsTop),
+      boundsRight: boundsRight == null && nullToAbsent
+          ? const Value.absent()
+          : Value(boundsRight),
+      boundsBottom: boundsBottom == null && nullToAbsent
+          ? const Value.absent()
+          : Value(boundsBottom),
+      serverUpdatedAt: serverUpdatedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(serverUpdatedAt),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory AvatarItemsTableData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return AvatarItemsTableData(
+      code: serializer.fromJson<String>(json['code']),
+      name: serializer.fromJson<String>(json['name']),
+      slot: serializer.fromJson<String>(json['slot']),
+      layer: serializer.fromJson<int>(json['layer']),
+      url: serializer.fromJson<String>(json['url']),
+      rarity: serializer.fromJson<String>(json['rarity']),
+      price: serializer.fromJson<int>(json['price']),
+      isDefault: serializer.fromJson<bool>(json['isDefault']),
+      svgSource: serializer.fromJson<String?>(json['svgSource']),
+      boundsLeft: serializer.fromJson<double?>(json['boundsLeft']),
+      boundsTop: serializer.fromJson<double?>(json['boundsTop']),
+      boundsRight: serializer.fromJson<double?>(json['boundsRight']),
+      boundsBottom: serializer.fromJson<double?>(json['boundsBottom']),
+      serverUpdatedAt: serializer.fromJson<DateTime?>(json['serverUpdatedAt']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'code': serializer.toJson<String>(code),
+      'name': serializer.toJson<String>(name),
+      'slot': serializer.toJson<String>(slot),
+      'layer': serializer.toJson<int>(layer),
+      'url': serializer.toJson<String>(url),
+      'rarity': serializer.toJson<String>(rarity),
+      'price': serializer.toJson<int>(price),
+      'isDefault': serializer.toJson<bool>(isDefault),
+      'svgSource': serializer.toJson<String?>(svgSource),
+      'boundsLeft': serializer.toJson<double?>(boundsLeft),
+      'boundsTop': serializer.toJson<double?>(boundsTop),
+      'boundsRight': serializer.toJson<double?>(boundsRight),
+      'boundsBottom': serializer.toJson<double?>(boundsBottom),
+      'serverUpdatedAt': serializer.toJson<DateTime?>(serverUpdatedAt),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+    };
+  }
+
+  AvatarItemsTableData copyWith({
+    String? code,
+    String? name,
+    String? slot,
+    int? layer,
+    String? url,
+    String? rarity,
+    int? price,
+    bool? isDefault,
+    Value<String?> svgSource = const Value.absent(),
+    Value<double?> boundsLeft = const Value.absent(),
+    Value<double?> boundsTop = const Value.absent(),
+    Value<double?> boundsRight = const Value.absent(),
+    Value<double?> boundsBottom = const Value.absent(),
+    Value<DateTime?> serverUpdatedAt = const Value.absent(),
+    DateTime? updatedAt,
+  }) => AvatarItemsTableData(
+    code: code ?? this.code,
+    name: name ?? this.name,
+    slot: slot ?? this.slot,
+    layer: layer ?? this.layer,
+    url: url ?? this.url,
+    rarity: rarity ?? this.rarity,
+    price: price ?? this.price,
+    isDefault: isDefault ?? this.isDefault,
+    svgSource: svgSource.present ? svgSource.value : this.svgSource,
+    boundsLeft: boundsLeft.present ? boundsLeft.value : this.boundsLeft,
+    boundsTop: boundsTop.present ? boundsTop.value : this.boundsTop,
+    boundsRight: boundsRight.present ? boundsRight.value : this.boundsRight,
+    boundsBottom: boundsBottom.present ? boundsBottom.value : this.boundsBottom,
+    serverUpdatedAt: serverUpdatedAt.present
+        ? serverUpdatedAt.value
+        : this.serverUpdatedAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  AvatarItemsTableData copyWithCompanion(AvatarItemsTableCompanion data) {
+    return AvatarItemsTableData(
+      code: data.code.present ? data.code.value : this.code,
+      name: data.name.present ? data.name.value : this.name,
+      slot: data.slot.present ? data.slot.value : this.slot,
+      layer: data.layer.present ? data.layer.value : this.layer,
+      url: data.url.present ? data.url.value : this.url,
+      rarity: data.rarity.present ? data.rarity.value : this.rarity,
+      price: data.price.present ? data.price.value : this.price,
+      isDefault: data.isDefault.present ? data.isDefault.value : this.isDefault,
+      svgSource: data.svgSource.present ? data.svgSource.value : this.svgSource,
+      boundsLeft: data.boundsLeft.present
+          ? data.boundsLeft.value
+          : this.boundsLeft,
+      boundsTop: data.boundsTop.present ? data.boundsTop.value : this.boundsTop,
+      boundsRight: data.boundsRight.present
+          ? data.boundsRight.value
+          : this.boundsRight,
+      boundsBottom: data.boundsBottom.present
+          ? data.boundsBottom.value
+          : this.boundsBottom,
+      serverUpdatedAt: data.serverUpdatedAt.present
+          ? data.serverUpdatedAt.value
+          : this.serverUpdatedAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AvatarItemsTableData(')
+          ..write('code: $code, ')
+          ..write('name: $name, ')
+          ..write('slot: $slot, ')
+          ..write('layer: $layer, ')
+          ..write('url: $url, ')
+          ..write('rarity: $rarity, ')
+          ..write('price: $price, ')
+          ..write('isDefault: $isDefault, ')
+          ..write('svgSource: $svgSource, ')
+          ..write('boundsLeft: $boundsLeft, ')
+          ..write('boundsTop: $boundsTop, ')
+          ..write('boundsRight: $boundsRight, ')
+          ..write('boundsBottom: $boundsBottom, ')
+          ..write('serverUpdatedAt: $serverUpdatedAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    code,
+    name,
+    slot,
+    layer,
+    url,
+    rarity,
+    price,
+    isDefault,
+    svgSource,
+    boundsLeft,
+    boundsTop,
+    boundsRight,
+    boundsBottom,
+    serverUpdatedAt,
+    updatedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is AvatarItemsTableData &&
+          other.code == this.code &&
+          other.name == this.name &&
+          other.slot == this.slot &&
+          other.layer == this.layer &&
+          other.url == this.url &&
+          other.rarity == this.rarity &&
+          other.price == this.price &&
+          other.isDefault == this.isDefault &&
+          other.svgSource == this.svgSource &&
+          other.boundsLeft == this.boundsLeft &&
+          other.boundsTop == this.boundsTop &&
+          other.boundsRight == this.boundsRight &&
+          other.boundsBottom == this.boundsBottom &&
+          other.serverUpdatedAt == this.serverUpdatedAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class AvatarItemsTableCompanion extends UpdateCompanion<AvatarItemsTableData> {
+  final Value<String> code;
+  final Value<String> name;
+  final Value<String> slot;
+  final Value<int> layer;
+  final Value<String> url;
+  final Value<String> rarity;
+  final Value<int> price;
+  final Value<bool> isDefault;
+  final Value<String?> svgSource;
+  final Value<double?> boundsLeft;
+  final Value<double?> boundsTop;
+  final Value<double?> boundsRight;
+  final Value<double?> boundsBottom;
+  final Value<DateTime?> serverUpdatedAt;
+  final Value<DateTime> updatedAt;
+  final Value<int> rowid;
+  const AvatarItemsTableCompanion({
+    this.code = const Value.absent(),
+    this.name = const Value.absent(),
+    this.slot = const Value.absent(),
+    this.layer = const Value.absent(),
+    this.url = const Value.absent(),
+    this.rarity = const Value.absent(),
+    this.price = const Value.absent(),
+    this.isDefault = const Value.absent(),
+    this.svgSource = const Value.absent(),
+    this.boundsLeft = const Value.absent(),
+    this.boundsTop = const Value.absent(),
+    this.boundsRight = const Value.absent(),
+    this.boundsBottom = const Value.absent(),
+    this.serverUpdatedAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  AvatarItemsTableCompanion.insert({
+    required String code,
+    required String name,
+    required String slot,
+    required int layer,
+    required String url,
+    this.rarity = const Value.absent(),
+    this.price = const Value.absent(),
+    this.isDefault = const Value.absent(),
+    this.svgSource = const Value.absent(),
+    this.boundsLeft = const Value.absent(),
+    this.boundsTop = const Value.absent(),
+    this.boundsRight = const Value.absent(),
+    this.boundsBottom = const Value.absent(),
+    this.serverUpdatedAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : code = Value(code),
+       name = Value(name),
+       slot = Value(slot),
+       layer = Value(layer),
+       url = Value(url);
+  static Insertable<AvatarItemsTableData> custom({
+    Expression<String>? code,
+    Expression<String>? name,
+    Expression<String>? slot,
+    Expression<int>? layer,
+    Expression<String>? url,
+    Expression<String>? rarity,
+    Expression<int>? price,
+    Expression<bool>? isDefault,
+    Expression<String>? svgSource,
+    Expression<double>? boundsLeft,
+    Expression<double>? boundsTop,
+    Expression<double>? boundsRight,
+    Expression<double>? boundsBottom,
+    Expression<DateTime>? serverUpdatedAt,
+    Expression<DateTime>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (code != null) 'code': code,
+      if (name != null) 'name': name,
+      if (slot != null) 'slot': slot,
+      if (layer != null) 'layer': layer,
+      if (url != null) 'url': url,
+      if (rarity != null) 'rarity': rarity,
+      if (price != null) 'price': price,
+      if (isDefault != null) 'is_default': isDefault,
+      if (svgSource != null) 'svg_source': svgSource,
+      if (boundsLeft != null) 'bounds_left': boundsLeft,
+      if (boundsTop != null) 'bounds_top': boundsTop,
+      if (boundsRight != null) 'bounds_right': boundsRight,
+      if (boundsBottom != null) 'bounds_bottom': boundsBottom,
+      if (serverUpdatedAt != null) 'server_updated_at': serverUpdatedAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  AvatarItemsTableCompanion copyWith({
+    Value<String>? code,
+    Value<String>? name,
+    Value<String>? slot,
+    Value<int>? layer,
+    Value<String>? url,
+    Value<String>? rarity,
+    Value<int>? price,
+    Value<bool>? isDefault,
+    Value<String?>? svgSource,
+    Value<double?>? boundsLeft,
+    Value<double?>? boundsTop,
+    Value<double?>? boundsRight,
+    Value<double?>? boundsBottom,
+    Value<DateTime?>? serverUpdatedAt,
+    Value<DateTime>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return AvatarItemsTableCompanion(
+      code: code ?? this.code,
+      name: name ?? this.name,
+      slot: slot ?? this.slot,
+      layer: layer ?? this.layer,
+      url: url ?? this.url,
+      rarity: rarity ?? this.rarity,
+      price: price ?? this.price,
+      isDefault: isDefault ?? this.isDefault,
+      svgSource: svgSource ?? this.svgSource,
+      boundsLeft: boundsLeft ?? this.boundsLeft,
+      boundsTop: boundsTop ?? this.boundsTop,
+      boundsRight: boundsRight ?? this.boundsRight,
+      boundsBottom: boundsBottom ?? this.boundsBottom,
+      serverUpdatedAt: serverUpdatedAt ?? this.serverUpdatedAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (code.present) {
+      map['code'] = Variable<String>(code.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (slot.present) {
+      map['slot'] = Variable<String>(slot.value);
+    }
+    if (layer.present) {
+      map['layer'] = Variable<int>(layer.value);
+    }
+    if (url.present) {
+      map['url'] = Variable<String>(url.value);
+    }
+    if (rarity.present) {
+      map['rarity'] = Variable<String>(rarity.value);
+    }
+    if (price.present) {
+      map['price'] = Variable<int>(price.value);
+    }
+    if (isDefault.present) {
+      map['is_default'] = Variable<bool>(isDefault.value);
+    }
+    if (svgSource.present) {
+      map['svg_source'] = Variable<String>(svgSource.value);
+    }
+    if (boundsLeft.present) {
+      map['bounds_left'] = Variable<double>(boundsLeft.value);
+    }
+    if (boundsTop.present) {
+      map['bounds_top'] = Variable<double>(boundsTop.value);
+    }
+    if (boundsRight.present) {
+      map['bounds_right'] = Variable<double>(boundsRight.value);
+    }
+    if (boundsBottom.present) {
+      map['bounds_bottom'] = Variable<double>(boundsBottom.value);
+    }
+    if (serverUpdatedAt.present) {
+      map['server_updated_at'] = Variable<DateTime>(serverUpdatedAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AvatarItemsTableCompanion(')
+          ..write('code: $code, ')
+          ..write('name: $name, ')
+          ..write('slot: $slot, ')
+          ..write('layer: $layer, ')
+          ..write('url: $url, ')
+          ..write('rarity: $rarity, ')
+          ..write('price: $price, ')
+          ..write('isDefault: $isDefault, ')
+          ..write('svgSource: $svgSource, ')
+          ..write('boundsLeft: $boundsLeft, ')
+          ..write('boundsTop: $boundsTop, ')
+          ..write('boundsRight: $boundsRight, ')
+          ..write('boundsBottom: $boundsBottom, ')
+          ..write('serverUpdatedAt: $serverUpdatedAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $UserAvatarTableTable extends UserAvatarTable
+    with TableInfo<$UserAvatarTableTable, UserAvatarTableData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $UserAvatarTableTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _userIdMeta = const VerificationMeta('userId');
+  @override
+  late final GeneratedColumn<String> userId = GeneratedColumn<String>(
+    'user_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _equippedMeta = const VerificationMeta(
+    'equipped',
+  );
+  @override
+  late final GeneratedColumn<String> equipped = GeneratedColumn<String>(
+    'equipped',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('{}'),
+  );
+  static const VerificationMeta _ownedCodesMeta = const VerificationMeta(
+    'ownedCodes',
+  );
+  @override
+  late final GeneratedColumn<String> ownedCodes = GeneratedColumn<String>(
+    'owned_codes',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('[]'),
+  );
+  static const VerificationMeta _syncStatusMeta = const VerificationMeta(
+    'syncStatus',
+  );
+  @override
+  late final GeneratedColumn<int> syncStatus = GeneratedColumn<int>(
+    'sync_status',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+    defaultValue: currentDateAndTime,
+  );
+  static const VerificationMeta _serverUpdatedAtMeta = const VerificationMeta(
+    'serverUpdatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> serverUpdatedAt =
+      GeneratedColumn<DateTime>(
+        'server_updated_at',
+        aliasedName,
+        true,
+        type: DriftSqlType.dateTime,
+        requiredDuringInsert: false,
+      );
+  @override
+  List<GeneratedColumn> get $columns => [
+    userId,
+    equipped,
+    ownedCodes,
+    syncStatus,
+    updatedAt,
+    serverUpdatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'user_avatar';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<UserAvatarTableData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('user_id')) {
+      context.handle(
+        _userIdMeta,
+        userId.isAcceptableOrUnknown(data['user_id']!, _userIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_userIdMeta);
+    }
+    if (data.containsKey('equipped')) {
+      context.handle(
+        _equippedMeta,
+        equipped.isAcceptableOrUnknown(data['equipped']!, _equippedMeta),
+      );
+    }
+    if (data.containsKey('owned_codes')) {
+      context.handle(
+        _ownedCodesMeta,
+        ownedCodes.isAcceptableOrUnknown(data['owned_codes']!, _ownedCodesMeta),
+      );
+    }
+    if (data.containsKey('sync_status')) {
+      context.handle(
+        _syncStatusMeta,
+        syncStatus.isAcceptableOrUnknown(data['sync_status']!, _syncStatusMeta),
+      );
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    }
+    if (data.containsKey('server_updated_at')) {
+      context.handle(
+        _serverUpdatedAtMeta,
+        serverUpdatedAt.isAcceptableOrUnknown(
+          data['server_updated_at']!,
+          _serverUpdatedAtMeta,
+        ),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {userId};
+  @override
+  UserAvatarTableData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return UserAvatarTableData(
+      userId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}user_id'],
+      )!,
+      equipped: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}equipped'],
+      )!,
+      ownedCodes: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}owned_codes'],
+      )!,
+      syncStatus: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}sync_status'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+      serverUpdatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}server_updated_at'],
+      ),
+    );
+  }
+
+  @override
+  $UserAvatarTableTable createAlias(String alias) {
+    return $UserAvatarTableTable(attachedDatabase, alias);
+  }
+}
+
+class UserAvatarTableData extends DataClass
+    implements Insertable<UserAvatarTableData> {
+  /// Local user id (`users.id`).
+  final String userId;
+
+  /// JSON object, slot => item code (`{"head":"head_zlata_korunka"}`). A slot
+  /// that is absent or null is simply not worn.
+  final String equipped;
+
+  /// JSON array of owned item codes. Default items are included by the server
+  /// so the app never has to special-case them.
+  final String ownedCodes;
+
+  /// Sync status: 0=synced, 1=pending, 2=conflict.
+  final int syncStatus;
+  final DateTime updatedAt;
+
+  /// Server's last write, for conflict detection on pull.
+  final DateTime? serverUpdatedAt;
+  const UserAvatarTableData({
+    required this.userId,
+    required this.equipped,
+    required this.ownedCodes,
+    required this.syncStatus,
+    required this.updatedAt,
+    this.serverUpdatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['user_id'] = Variable<String>(userId);
+    map['equipped'] = Variable<String>(equipped);
+    map['owned_codes'] = Variable<String>(ownedCodes);
+    map['sync_status'] = Variable<int>(syncStatus);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    if (!nullToAbsent || serverUpdatedAt != null) {
+      map['server_updated_at'] = Variable<DateTime>(serverUpdatedAt);
+    }
+    return map;
+  }
+
+  UserAvatarTableCompanion toCompanion(bool nullToAbsent) {
+    return UserAvatarTableCompanion(
+      userId: Value(userId),
+      equipped: Value(equipped),
+      ownedCodes: Value(ownedCodes),
+      syncStatus: Value(syncStatus),
+      updatedAt: Value(updatedAt),
+      serverUpdatedAt: serverUpdatedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(serverUpdatedAt),
+    );
+  }
+
+  factory UserAvatarTableData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return UserAvatarTableData(
+      userId: serializer.fromJson<String>(json['userId']),
+      equipped: serializer.fromJson<String>(json['equipped']),
+      ownedCodes: serializer.fromJson<String>(json['ownedCodes']),
+      syncStatus: serializer.fromJson<int>(json['syncStatus']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+      serverUpdatedAt: serializer.fromJson<DateTime?>(json['serverUpdatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'userId': serializer.toJson<String>(userId),
+      'equipped': serializer.toJson<String>(equipped),
+      'ownedCodes': serializer.toJson<String>(ownedCodes),
+      'syncStatus': serializer.toJson<int>(syncStatus),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+      'serverUpdatedAt': serializer.toJson<DateTime?>(serverUpdatedAt),
+    };
+  }
+
+  UserAvatarTableData copyWith({
+    String? userId,
+    String? equipped,
+    String? ownedCodes,
+    int? syncStatus,
+    DateTime? updatedAt,
+    Value<DateTime?> serverUpdatedAt = const Value.absent(),
+  }) => UserAvatarTableData(
+    userId: userId ?? this.userId,
+    equipped: equipped ?? this.equipped,
+    ownedCodes: ownedCodes ?? this.ownedCodes,
+    syncStatus: syncStatus ?? this.syncStatus,
+    updatedAt: updatedAt ?? this.updatedAt,
+    serverUpdatedAt: serverUpdatedAt.present
+        ? serverUpdatedAt.value
+        : this.serverUpdatedAt,
+  );
+  UserAvatarTableData copyWithCompanion(UserAvatarTableCompanion data) {
+    return UserAvatarTableData(
+      userId: data.userId.present ? data.userId.value : this.userId,
+      equipped: data.equipped.present ? data.equipped.value : this.equipped,
+      ownedCodes: data.ownedCodes.present
+          ? data.ownedCodes.value
+          : this.ownedCodes,
+      syncStatus: data.syncStatus.present
+          ? data.syncStatus.value
+          : this.syncStatus,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      serverUpdatedAt: data.serverUpdatedAt.present
+          ? data.serverUpdatedAt.value
+          : this.serverUpdatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('UserAvatarTableData(')
+          ..write('userId: $userId, ')
+          ..write('equipped: $equipped, ')
+          ..write('ownedCodes: $ownedCodes, ')
+          ..write('syncStatus: $syncStatus, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('serverUpdatedAt: $serverUpdatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    userId,
+    equipped,
+    ownedCodes,
+    syncStatus,
+    updatedAt,
+    serverUpdatedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is UserAvatarTableData &&
+          other.userId == this.userId &&
+          other.equipped == this.equipped &&
+          other.ownedCodes == this.ownedCodes &&
+          other.syncStatus == this.syncStatus &&
+          other.updatedAt == this.updatedAt &&
+          other.serverUpdatedAt == this.serverUpdatedAt);
+}
+
+class UserAvatarTableCompanion extends UpdateCompanion<UserAvatarTableData> {
+  final Value<String> userId;
+  final Value<String> equipped;
+  final Value<String> ownedCodes;
+  final Value<int> syncStatus;
+  final Value<DateTime> updatedAt;
+  final Value<DateTime?> serverUpdatedAt;
+  final Value<int> rowid;
+  const UserAvatarTableCompanion({
+    this.userId = const Value.absent(),
+    this.equipped = const Value.absent(),
+    this.ownedCodes = const Value.absent(),
+    this.syncStatus = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.serverUpdatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  UserAvatarTableCompanion.insert({
+    required String userId,
+    this.equipped = const Value.absent(),
+    this.ownedCodes = const Value.absent(),
+    this.syncStatus = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.serverUpdatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : userId = Value(userId);
+  static Insertable<UserAvatarTableData> custom({
+    Expression<String>? userId,
+    Expression<String>? equipped,
+    Expression<String>? ownedCodes,
+    Expression<int>? syncStatus,
+    Expression<DateTime>? updatedAt,
+    Expression<DateTime>? serverUpdatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (userId != null) 'user_id': userId,
+      if (equipped != null) 'equipped': equipped,
+      if (ownedCodes != null) 'owned_codes': ownedCodes,
+      if (syncStatus != null) 'sync_status': syncStatus,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (serverUpdatedAt != null) 'server_updated_at': serverUpdatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  UserAvatarTableCompanion copyWith({
+    Value<String>? userId,
+    Value<String>? equipped,
+    Value<String>? ownedCodes,
+    Value<int>? syncStatus,
+    Value<DateTime>? updatedAt,
+    Value<DateTime?>? serverUpdatedAt,
+    Value<int>? rowid,
+  }) {
+    return UserAvatarTableCompanion(
+      userId: userId ?? this.userId,
+      equipped: equipped ?? this.equipped,
+      ownedCodes: ownedCodes ?? this.ownedCodes,
+      syncStatus: syncStatus ?? this.syncStatus,
+      updatedAt: updatedAt ?? this.updatedAt,
+      serverUpdatedAt: serverUpdatedAt ?? this.serverUpdatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (userId.present) {
+      map['user_id'] = Variable<String>(userId.value);
+    }
+    if (equipped.present) {
+      map['equipped'] = Variable<String>(equipped.value);
+    }
+    if (ownedCodes.present) {
+      map['owned_codes'] = Variable<String>(ownedCodes.value);
+    }
+    if (syncStatus.present) {
+      map['sync_status'] = Variable<int>(syncStatus.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (serverUpdatedAt.present) {
+      map['server_updated_at'] = Variable<DateTime>(serverUpdatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('UserAvatarTableCompanion(')
+          ..write('userId: $userId, ')
+          ..write('equipped: $equipped, ')
+          ..write('ownedCodes: $ownedCodes, ')
+          ..write('syncStatus: $syncStatus, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('serverUpdatedAt: $serverUpdatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -12667,6 +14210,12 @@ abstract class _$AppDatabase extends GeneratedDatabase {
       $WorkHeartbeatsTableTable(this);
   late final $GpfDimensionsTableTable gpfDimensionsTable =
       $GpfDimensionsTableTable(this);
+  late final $AvatarItemsTableTable avatarItemsTable = $AvatarItemsTableTable(
+    this,
+  );
+  late final $UserAvatarTableTable userAvatarTable = $UserAvatarTableTable(
+    this,
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -12691,6 +14240,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     studentFsrsProfilesTable,
     workHeartbeatsTable,
     gpfDimensionsTable,
+    avatarItemsTable,
+    userAvatarTable,
   ];
 }
 
@@ -12704,6 +14255,7 @@ typedef $$CoursesTableTableCreateCompanionBuilder =
       Value<String> status,
       Value<String> language,
       Value<String> data,
+      Value<bool> onlyOnce,
       Value<int> syncStatus,
       Value<DateTime> createdAt,
       Value<DateTime> updatedAt,
@@ -12720,6 +14272,7 @@ typedef $$CoursesTableTableUpdateCompanionBuilder =
       Value<String> status,
       Value<String> language,
       Value<String> data,
+      Value<bool> onlyOnce,
       Value<int> syncStatus,
       Value<DateTime> createdAt,
       Value<DateTime> updatedAt,
@@ -12773,6 +14326,11 @@ class $$CoursesTableTableFilterComposer
 
   ColumnFilters<String> get data => $composableBuilder(
     column: $table.data,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get onlyOnce => $composableBuilder(
+    column: $table.onlyOnce,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -12846,6 +14404,11 @@ class $$CoursesTableTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<bool> get onlyOnce => $composableBuilder(
+    column: $table.onlyOnce,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<int> get syncStatus => $composableBuilder(
     column: $table.syncStatus,
     builder: (column) => ColumnOrderings(column),
@@ -12899,6 +14462,9 @@ class $$CoursesTableTableAnnotationComposer
 
   GeneratedColumn<String> get data =>
       $composableBuilder(column: $table.data, builder: (column) => column);
+
+  GeneratedColumn<bool> get onlyOnce =>
+      $composableBuilder(column: $table.onlyOnce, builder: (column) => column);
 
   GeneratedColumn<int> get syncStatus => $composableBuilder(
     column: $table.syncStatus,
@@ -12956,6 +14522,7 @@ class $$CoursesTableTableTableManager
                 Value<String> status = const Value.absent(),
                 Value<String> language = const Value.absent(),
                 Value<String> data = const Value.absent(),
+                Value<bool> onlyOnce = const Value.absent(),
                 Value<int> syncStatus = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<DateTime> updatedAt = const Value.absent(),
@@ -12970,6 +14537,7 @@ class $$CoursesTableTableTableManager
                 status: status,
                 language: language,
                 data: data,
+                onlyOnce: onlyOnce,
                 syncStatus: syncStatus,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
@@ -12986,6 +14554,7 @@ class $$CoursesTableTableTableManager
                 Value<String> status = const Value.absent(),
                 Value<String> language = const Value.absent(),
                 Value<String> data = const Value.absent(),
+                Value<bool> onlyOnce = const Value.absent(),
                 Value<int> syncStatus = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<DateTime> updatedAt = const Value.absent(),
@@ -13000,6 +14569,7 @@ class $$CoursesTableTableTableManager
                 status: status,
                 language: language,
                 data: data,
+                onlyOnce: onlyOnce,
                 syncStatus: syncStatus,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
@@ -14883,6 +16453,8 @@ typedef $$UserStatsTableTableCreateCompanionBuilder =
       Value<DateTime?> lastStreakDate,
       Value<DateTime?> dailyXpDate,
       Value<int> dailyXpAmount,
+      Value<int> coinsEarned,
+      Value<int> coinsBalance,
       Value<int> syncStatus,
       Value<DateTime> createdAt,
       Value<DateTime> updatedAt,
@@ -14902,6 +16474,8 @@ typedef $$UserStatsTableTableUpdateCompanionBuilder =
       Value<DateTime?> lastStreakDate,
       Value<DateTime?> dailyXpDate,
       Value<int> dailyXpAmount,
+      Value<int> coinsEarned,
+      Value<int> coinsBalance,
       Value<int> syncStatus,
       Value<DateTime> createdAt,
       Value<DateTime> updatedAt,
@@ -14970,6 +16544,16 @@ class $$UserStatsTableTableFilterComposer
 
   ColumnFilters<int> get dailyXpAmount => $composableBuilder(
     column: $table.dailyXpAmount,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get coinsEarned => $composableBuilder(
+    column: $table.coinsEarned,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get coinsBalance => $composableBuilder(
+    column: $table.coinsBalance,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -15058,6 +16642,16 @@ class $$UserStatsTableTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<int> get coinsEarned => $composableBuilder(
+    column: $table.coinsEarned,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get coinsBalance => $composableBuilder(
+    column: $table.coinsBalance,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<int> get syncStatus => $composableBuilder(
     column: $table.syncStatus,
     builder: (column) => ColumnOrderings(column),
@@ -15133,6 +16727,16 @@ class $$UserStatsTableTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<int> get coinsEarned => $composableBuilder(
+    column: $table.coinsEarned,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get coinsBalance => $composableBuilder(
+    column: $table.coinsBalance,
+    builder: (column) => column,
+  );
+
   GeneratedColumn<int> get syncStatus => $composableBuilder(
     column: $table.syncStatus,
     builder: (column) => column,
@@ -15198,6 +16802,8 @@ class $$UserStatsTableTableTableManager
                 Value<DateTime?> lastStreakDate = const Value.absent(),
                 Value<DateTime?> dailyXpDate = const Value.absent(),
                 Value<int> dailyXpAmount = const Value.absent(),
+                Value<int> coinsEarned = const Value.absent(),
+                Value<int> coinsBalance = const Value.absent(),
                 Value<int> syncStatus = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<DateTime> updatedAt = const Value.absent(),
@@ -15215,6 +16821,8 @@ class $$UserStatsTableTableTableManager
                 lastStreakDate: lastStreakDate,
                 dailyXpDate: dailyXpDate,
                 dailyXpAmount: dailyXpAmount,
+                coinsEarned: coinsEarned,
+                coinsBalance: coinsBalance,
                 syncStatus: syncStatus,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
@@ -15234,6 +16842,8 @@ class $$UserStatsTableTableTableManager
                 Value<DateTime?> lastStreakDate = const Value.absent(),
                 Value<DateTime?> dailyXpDate = const Value.absent(),
                 Value<int> dailyXpAmount = const Value.absent(),
+                Value<int> coinsEarned = const Value.absent(),
+                Value<int> coinsBalance = const Value.absent(),
                 Value<int> syncStatus = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
                 Value<DateTime> updatedAt = const Value.absent(),
@@ -15251,6 +16861,8 @@ class $$UserStatsTableTableTableManager
                 lastStreakDate: lastStreakDate,
                 dailyXpDate: dailyXpDate,
                 dailyXpAmount: dailyXpAmount,
+                coinsEarned: coinsEarned,
+                coinsBalance: coinsBalance,
                 syncStatus: syncStatus,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
@@ -16197,6 +17809,7 @@ typedef $$BlockStatsTableTableCreateCompanionBuilder =
       required String blockId,
       required String itemPocet,
       required String eloVector,
+      Value<String?> courseId,
       Value<DateTime> updatedAt,
       Value<int> rowid,
     });
@@ -16205,6 +17818,7 @@ typedef $$BlockStatsTableTableUpdateCompanionBuilder =
       Value<String> blockId,
       Value<String> itemPocet,
       Value<String> eloVector,
+      Value<String?> courseId,
       Value<DateTime> updatedAt,
       Value<int> rowid,
     });
@@ -16230,6 +17844,11 @@ class $$BlockStatsTableTableFilterComposer
 
   ColumnFilters<String> get eloVector => $composableBuilder(
     column: $table.eloVector,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get courseId => $composableBuilder(
+    column: $table.courseId,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -16263,6 +17882,11 @@ class $$BlockStatsTableTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get courseId => $composableBuilder(
+    column: $table.courseId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
     column: $table.updatedAt,
     builder: (column) => ColumnOrderings(column),
@@ -16286,6 +17910,9 @@ class $$BlockStatsTableTableAnnotationComposer
 
   GeneratedColumn<String> get eloVector =>
       $composableBuilder(column: $table.eloVector, builder: (column) => column);
+
+  GeneratedColumn<String> get courseId =>
+      $composableBuilder(column: $table.courseId, builder: (column) => column);
 
   GeneratedColumn<DateTime> get updatedAt =>
       $composableBuilder(column: $table.updatedAt, builder: (column) => column);
@@ -16331,12 +17958,14 @@ class $$BlockStatsTableTableTableManager
                 Value<String> blockId = const Value.absent(),
                 Value<String> itemPocet = const Value.absent(),
                 Value<String> eloVector = const Value.absent(),
+                Value<String?> courseId = const Value.absent(),
                 Value<DateTime> updatedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => BlockStatsTableCompanion(
                 blockId: blockId,
                 itemPocet: itemPocet,
                 eloVector: eloVector,
+                courseId: courseId,
                 updatedAt: updatedAt,
                 rowid: rowid,
               ),
@@ -16345,12 +17974,14 @@ class $$BlockStatsTableTableTableManager
                 required String blockId,
                 required String itemPocet,
                 required String eloVector,
+                Value<String?> courseId = const Value.absent(),
                 Value<DateTime> updatedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => BlockStatsTableCompanion.insert(
                 blockId: blockId,
                 itemPocet: itemPocet,
                 eloVector: eloVector,
+                courseId: courseId,
                 updatedAt: updatedAt,
                 rowid: rowid,
               ),
@@ -18925,6 +20556,649 @@ typedef $$GpfDimensionsTableTableProcessedTableManager =
       GpfDimensionsTableData,
       PrefetchHooks Function()
     >;
+typedef $$AvatarItemsTableTableCreateCompanionBuilder =
+    AvatarItemsTableCompanion Function({
+      required String code,
+      required String name,
+      required String slot,
+      required int layer,
+      required String url,
+      Value<String> rarity,
+      Value<int> price,
+      Value<bool> isDefault,
+      Value<String?> svgSource,
+      Value<double?> boundsLeft,
+      Value<double?> boundsTop,
+      Value<double?> boundsRight,
+      Value<double?> boundsBottom,
+      Value<DateTime?> serverUpdatedAt,
+      Value<DateTime> updatedAt,
+      Value<int> rowid,
+    });
+typedef $$AvatarItemsTableTableUpdateCompanionBuilder =
+    AvatarItemsTableCompanion Function({
+      Value<String> code,
+      Value<String> name,
+      Value<String> slot,
+      Value<int> layer,
+      Value<String> url,
+      Value<String> rarity,
+      Value<int> price,
+      Value<bool> isDefault,
+      Value<String?> svgSource,
+      Value<double?> boundsLeft,
+      Value<double?> boundsTop,
+      Value<double?> boundsRight,
+      Value<double?> boundsBottom,
+      Value<DateTime?> serverUpdatedAt,
+      Value<DateTime> updatedAt,
+      Value<int> rowid,
+    });
+
+class $$AvatarItemsTableTableFilterComposer
+    extends Composer<_$AppDatabase, $AvatarItemsTableTable> {
+  $$AvatarItemsTableTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get code => $composableBuilder(
+    column: $table.code,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get slot => $composableBuilder(
+    column: $table.slot,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get layer => $composableBuilder(
+    column: $table.layer,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get url => $composableBuilder(
+    column: $table.url,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get rarity => $composableBuilder(
+    column: $table.rarity,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get price => $composableBuilder(
+    column: $table.price,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isDefault => $composableBuilder(
+    column: $table.isDefault,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get svgSource => $composableBuilder(
+    column: $table.svgSource,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get boundsLeft => $composableBuilder(
+    column: $table.boundsLeft,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get boundsTop => $composableBuilder(
+    column: $table.boundsTop,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get boundsRight => $composableBuilder(
+    column: $table.boundsRight,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get boundsBottom => $composableBuilder(
+    column: $table.boundsBottom,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get serverUpdatedAt => $composableBuilder(
+    column: $table.serverUpdatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$AvatarItemsTableTableOrderingComposer
+    extends Composer<_$AppDatabase, $AvatarItemsTableTable> {
+  $$AvatarItemsTableTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get code => $composableBuilder(
+    column: $table.code,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get slot => $composableBuilder(
+    column: $table.slot,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get layer => $composableBuilder(
+    column: $table.layer,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get url => $composableBuilder(
+    column: $table.url,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get rarity => $composableBuilder(
+    column: $table.rarity,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get price => $composableBuilder(
+    column: $table.price,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isDefault => $composableBuilder(
+    column: $table.isDefault,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get svgSource => $composableBuilder(
+    column: $table.svgSource,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get boundsLeft => $composableBuilder(
+    column: $table.boundsLeft,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get boundsTop => $composableBuilder(
+    column: $table.boundsTop,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get boundsRight => $composableBuilder(
+    column: $table.boundsRight,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get boundsBottom => $composableBuilder(
+    column: $table.boundsBottom,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get serverUpdatedAt => $composableBuilder(
+    column: $table.serverUpdatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$AvatarItemsTableTableAnnotationComposer
+    extends Composer<_$AppDatabase, $AvatarItemsTableTable> {
+  $$AvatarItemsTableTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get code =>
+      $composableBuilder(column: $table.code, builder: (column) => column);
+
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<String> get slot =>
+      $composableBuilder(column: $table.slot, builder: (column) => column);
+
+  GeneratedColumn<int> get layer =>
+      $composableBuilder(column: $table.layer, builder: (column) => column);
+
+  GeneratedColumn<String> get url =>
+      $composableBuilder(column: $table.url, builder: (column) => column);
+
+  GeneratedColumn<String> get rarity =>
+      $composableBuilder(column: $table.rarity, builder: (column) => column);
+
+  GeneratedColumn<int> get price =>
+      $composableBuilder(column: $table.price, builder: (column) => column);
+
+  GeneratedColumn<bool> get isDefault =>
+      $composableBuilder(column: $table.isDefault, builder: (column) => column);
+
+  GeneratedColumn<String> get svgSource =>
+      $composableBuilder(column: $table.svgSource, builder: (column) => column);
+
+  GeneratedColumn<double> get boundsLeft => $composableBuilder(
+    column: $table.boundsLeft,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<double> get boundsTop =>
+      $composableBuilder(column: $table.boundsTop, builder: (column) => column);
+
+  GeneratedColumn<double> get boundsRight => $composableBuilder(
+    column: $table.boundsRight,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<double> get boundsBottom => $composableBuilder(
+    column: $table.boundsBottom,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get serverUpdatedAt => $composableBuilder(
+    column: $table.serverUpdatedAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$AvatarItemsTableTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $AvatarItemsTableTable,
+          AvatarItemsTableData,
+          $$AvatarItemsTableTableFilterComposer,
+          $$AvatarItemsTableTableOrderingComposer,
+          $$AvatarItemsTableTableAnnotationComposer,
+          $$AvatarItemsTableTableCreateCompanionBuilder,
+          $$AvatarItemsTableTableUpdateCompanionBuilder,
+          (
+            AvatarItemsTableData,
+            BaseReferences<
+              _$AppDatabase,
+              $AvatarItemsTableTable,
+              AvatarItemsTableData
+            >,
+          ),
+          AvatarItemsTableData,
+          PrefetchHooks Function()
+        > {
+  $$AvatarItemsTableTableTableManager(
+    _$AppDatabase db,
+    $AvatarItemsTableTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$AvatarItemsTableTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$AvatarItemsTableTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$AvatarItemsTableTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> code = const Value.absent(),
+                Value<String> name = const Value.absent(),
+                Value<String> slot = const Value.absent(),
+                Value<int> layer = const Value.absent(),
+                Value<String> url = const Value.absent(),
+                Value<String> rarity = const Value.absent(),
+                Value<int> price = const Value.absent(),
+                Value<bool> isDefault = const Value.absent(),
+                Value<String?> svgSource = const Value.absent(),
+                Value<double?> boundsLeft = const Value.absent(),
+                Value<double?> boundsTop = const Value.absent(),
+                Value<double?> boundsRight = const Value.absent(),
+                Value<double?> boundsBottom = const Value.absent(),
+                Value<DateTime?> serverUpdatedAt = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => AvatarItemsTableCompanion(
+                code: code,
+                name: name,
+                slot: slot,
+                layer: layer,
+                url: url,
+                rarity: rarity,
+                price: price,
+                isDefault: isDefault,
+                svgSource: svgSource,
+                boundsLeft: boundsLeft,
+                boundsTop: boundsTop,
+                boundsRight: boundsRight,
+                boundsBottom: boundsBottom,
+                serverUpdatedAt: serverUpdatedAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String code,
+                required String name,
+                required String slot,
+                required int layer,
+                required String url,
+                Value<String> rarity = const Value.absent(),
+                Value<int> price = const Value.absent(),
+                Value<bool> isDefault = const Value.absent(),
+                Value<String?> svgSource = const Value.absent(),
+                Value<double?> boundsLeft = const Value.absent(),
+                Value<double?> boundsTop = const Value.absent(),
+                Value<double?> boundsRight = const Value.absent(),
+                Value<double?> boundsBottom = const Value.absent(),
+                Value<DateTime?> serverUpdatedAt = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => AvatarItemsTableCompanion.insert(
+                code: code,
+                name: name,
+                slot: slot,
+                layer: layer,
+                url: url,
+                rarity: rarity,
+                price: price,
+                isDefault: isDefault,
+                svgSource: svgSource,
+                boundsLeft: boundsLeft,
+                boundsTop: boundsTop,
+                boundsRight: boundsRight,
+                boundsBottom: boundsBottom,
+                serverUpdatedAt: serverUpdatedAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$AvatarItemsTableTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $AvatarItemsTableTable,
+      AvatarItemsTableData,
+      $$AvatarItemsTableTableFilterComposer,
+      $$AvatarItemsTableTableOrderingComposer,
+      $$AvatarItemsTableTableAnnotationComposer,
+      $$AvatarItemsTableTableCreateCompanionBuilder,
+      $$AvatarItemsTableTableUpdateCompanionBuilder,
+      (
+        AvatarItemsTableData,
+        BaseReferences<
+          _$AppDatabase,
+          $AvatarItemsTableTable,
+          AvatarItemsTableData
+        >,
+      ),
+      AvatarItemsTableData,
+      PrefetchHooks Function()
+    >;
+typedef $$UserAvatarTableTableCreateCompanionBuilder =
+    UserAvatarTableCompanion Function({
+      required String userId,
+      Value<String> equipped,
+      Value<String> ownedCodes,
+      Value<int> syncStatus,
+      Value<DateTime> updatedAt,
+      Value<DateTime?> serverUpdatedAt,
+      Value<int> rowid,
+    });
+typedef $$UserAvatarTableTableUpdateCompanionBuilder =
+    UserAvatarTableCompanion Function({
+      Value<String> userId,
+      Value<String> equipped,
+      Value<String> ownedCodes,
+      Value<int> syncStatus,
+      Value<DateTime> updatedAt,
+      Value<DateTime?> serverUpdatedAt,
+      Value<int> rowid,
+    });
+
+class $$UserAvatarTableTableFilterComposer
+    extends Composer<_$AppDatabase, $UserAvatarTableTable> {
+  $$UserAvatarTableTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get equipped => $composableBuilder(
+    column: $table.equipped,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get ownedCodes => $composableBuilder(
+    column: $table.ownedCodes,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get syncStatus => $composableBuilder(
+    column: $table.syncStatus,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get serverUpdatedAt => $composableBuilder(
+    column: $table.serverUpdatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$UserAvatarTableTableOrderingComposer
+    extends Composer<_$AppDatabase, $UserAvatarTableTable> {
+  $$UserAvatarTableTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get equipped => $composableBuilder(
+    column: $table.equipped,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get ownedCodes => $composableBuilder(
+    column: $table.ownedCodes,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get syncStatus => $composableBuilder(
+    column: $table.syncStatus,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get serverUpdatedAt => $composableBuilder(
+    column: $table.serverUpdatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$UserAvatarTableTableAnnotationComposer
+    extends Composer<_$AppDatabase, $UserAvatarTableTable> {
+  $$UserAvatarTableTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get userId =>
+      $composableBuilder(column: $table.userId, builder: (column) => column);
+
+  GeneratedColumn<String> get equipped =>
+      $composableBuilder(column: $table.equipped, builder: (column) => column);
+
+  GeneratedColumn<String> get ownedCodes => $composableBuilder(
+    column: $table.ownedCodes,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get syncStatus => $composableBuilder(
+    column: $table.syncStatus,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get serverUpdatedAt => $composableBuilder(
+    column: $table.serverUpdatedAt,
+    builder: (column) => column,
+  );
+}
+
+class $$UserAvatarTableTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $UserAvatarTableTable,
+          UserAvatarTableData,
+          $$UserAvatarTableTableFilterComposer,
+          $$UserAvatarTableTableOrderingComposer,
+          $$UserAvatarTableTableAnnotationComposer,
+          $$UserAvatarTableTableCreateCompanionBuilder,
+          $$UserAvatarTableTableUpdateCompanionBuilder,
+          (
+            UserAvatarTableData,
+            BaseReferences<
+              _$AppDatabase,
+              $UserAvatarTableTable,
+              UserAvatarTableData
+            >,
+          ),
+          UserAvatarTableData,
+          PrefetchHooks Function()
+        > {
+  $$UserAvatarTableTableTableManager(
+    _$AppDatabase db,
+    $UserAvatarTableTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$UserAvatarTableTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$UserAvatarTableTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$UserAvatarTableTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> userId = const Value.absent(),
+                Value<String> equipped = const Value.absent(),
+                Value<String> ownedCodes = const Value.absent(),
+                Value<int> syncStatus = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<DateTime?> serverUpdatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => UserAvatarTableCompanion(
+                userId: userId,
+                equipped: equipped,
+                ownedCodes: ownedCodes,
+                syncStatus: syncStatus,
+                updatedAt: updatedAt,
+                serverUpdatedAt: serverUpdatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String userId,
+                Value<String> equipped = const Value.absent(),
+                Value<String> ownedCodes = const Value.absent(),
+                Value<int> syncStatus = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<DateTime?> serverUpdatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => UserAvatarTableCompanion.insert(
+                userId: userId,
+                equipped: equipped,
+                ownedCodes: ownedCodes,
+                syncStatus: syncStatus,
+                updatedAt: updatedAt,
+                serverUpdatedAt: serverUpdatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$UserAvatarTableTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $UserAvatarTableTable,
+      UserAvatarTableData,
+      $$UserAvatarTableTableFilterComposer,
+      $$UserAvatarTableTableOrderingComposer,
+      $$UserAvatarTableTableAnnotationComposer,
+      $$UserAvatarTableTableCreateCompanionBuilder,
+      $$UserAvatarTableTableUpdateCompanionBuilder,
+      (
+        UserAvatarTableData,
+        BaseReferences<
+          _$AppDatabase,
+          $UserAvatarTableTable,
+          UserAvatarTableData
+        >,
+      ),
+      UserAvatarTableData,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -18973,4 +21247,8 @@ class $AppDatabaseManager {
       $$WorkHeartbeatsTableTableTableManager(_db, _db.workHeartbeatsTable);
   $$GpfDimensionsTableTableTableManager get gpfDimensionsTable =>
       $$GpfDimensionsTableTableTableManager(_db, _db.gpfDimensionsTable);
+  $$AvatarItemsTableTableTableManager get avatarItemsTable =>
+      $$AvatarItemsTableTableTableManager(_db, _db.avatarItemsTable);
+  $$UserAvatarTableTableTableManager get userAvatarTable =>
+      $$UserAvatarTableTableTableManager(_db, _db.userAvatarTable);
 }

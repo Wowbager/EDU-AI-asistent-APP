@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/image_url.dart';
 import '../../models/course_model.dart';
+import '../../widgets/lesson_image.dart';
 import 'card_container.dart';
 
 /// Legacy text block card (LessonBlock format).
@@ -68,8 +69,8 @@ class LessonLegacyImageCard extends StatelessWidget {
                 : block.imageUrl != null
                     ? ClipRRect(
                         borderRadius: AppDecorations.radiusM,
-                        child: Image.network(
-                          resolveImageUrl(block.imageUrl!),
+                        child: LessonImage(
+                          url: block.imageUrl!,
                           fit: BoxFit.cover,
                           width: double.infinity,
                           height: 180,

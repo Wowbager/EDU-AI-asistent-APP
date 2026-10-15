@@ -1,12 +1,18 @@
 import 'package:flutter/material.dart';
 import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
+import '../core/layout/breakpoints.dart';
 
 class AddPage extends StatelessWidget {
   const AddPage({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ContentWidth(maxWidth: ContentWidth.reading, child: _buildPage(context));
+
+  /// This page has no wide layout yet, so [ContentWidth] keeps it at phone
+  /// width instead of stretching it across a monitor.
+  Widget _buildPage(BuildContext context) {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),

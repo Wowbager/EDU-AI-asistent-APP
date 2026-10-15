@@ -53,4 +53,53 @@ void main() {
 
     expect(session.inactivityRemaining(), Duration.zero);
   });
+
+  // touchActivity() is called from every pointer/scroll/keyboard event, so it
+  // coalesces writes: it refreshes lastActiveAt, but skips the write when the
+  // previous one is very recent (BR-ZKY22S).
+  group('touchActivity', () {
+    test('does nothing for a non-shared session', () async {
+      final session = await sessionWith({'session_shared_device': false});
+      await session.touchActivity();
+      expect(session.lastActiveAt, isNull);
+    });
+
+    test('records activity when none was recorded yet', () async {
+      final session = await sessionWith({'session_shared_device': true});
+      await session.touchActivity();
+      expect(session.lastActiveAt, isNotNull);
+    });
+
+    test('refreshes lastActiveAt when the previous one is stale', () async {
+      final stale = DateTime.now().subtract(const Duration(minutes: 5));
+      final session = await sessionWith({
+        'session_shared_device': true,
+        'session_last_active_at': stale.millisecondsSinceEpoch,
+      });
+
+      await session.touchActivity();
+
+      // Moved forward well past the stale timestamp.
+      expect(
+        session.lastActiveAt!.difference(stale),
+        greaterThan(const Duration(minutes: 4)),
+      );
+    });
+
+    test('coalesces a burst of events into (at most) no forward jump', () async {
+      final justNow = DateTime.now().subtract(const Duration(seconds: 1));
+      final session = await sessionWith({
+        'session_shared_device': true,
+        'session_last_active_at': justNow.millisecondsSinceEpoch,
+      });
+
+      await session.touchActivity();
+
+      // Within the throttle window, so the stored timestamp is left untouched.
+      expect(
+        session.lastActiveAt!.millisecondsSinceEpoch,
+        justNow.millisecondsSinceEpoch,
+      );
+    });
+  });
 }

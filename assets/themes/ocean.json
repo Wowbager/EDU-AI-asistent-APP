@@ -57,7 +57,10 @@
     "skillRed": "#FFCDD2",
     "skillBlue": "#BBDEFB",
 
-    "gradientGold": "#FFD54F"
+    "gradientGold": "#FFD54F",
+
+    "navScrimTop": "#6A7F95",
+    "navScrimBottom": "#122841"
   },
   "typography": {
     "headingFont": "Nunito",

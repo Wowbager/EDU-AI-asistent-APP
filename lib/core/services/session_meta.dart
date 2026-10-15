@@ -93,10 +93,18 @@ class SessionMeta {
     }
   }
 
+  /// Coalesce activity writes: keyboard/scroll events fire many times per
+  /// second, so skip the disk write when the last one is this recent. Well
+  /// under [inactivityLimit], so the logout decision is unaffected.
+  static const Duration _touchThrottle = Duration(seconds: 10);
+
   /// Update the last-active timestamp. No-op when not in shared mode.
   Future<void> touchActivity() async {
     if (!sharedDevice) return;
-    await _prefs.setInt(_lastActiveAtKey, DateTime.now().millisecondsSinceEpoch);
+    final last = lastActiveAt;
+    final now = DateTime.now();
+    if (last != null && now.difference(last) < _touchThrottle) return;
+    await _prefs.setInt(_lastActiveAtKey, now.millisecondsSinceEpoch);
   }
 
   /// True when the access token is past its expiration or within rotateMargin.
@@ -140,9 +148,12 @@ class SessionMeta {
     await _prefs.remove(_expiresAtKey);
     await _prefs.remove(_sessionStartedAtKey);
     await _prefs.remove(_lastActiveAtKey);
-    // Intentionally keep _pendingSharedKey — represents the user's stated
-    // preference for this device, persists across logout/login cycles so a
-    // shared classroom tablet stays in shared mode automatically.
+    // Reset the pre-login choice to the secure default (shared) as well.
+    // On web these prefs live in localStorage, shared by everyone using the
+    // browser profile, so a leftover opt-out would pre-tick "stay logged in
+    // permanently" for the next person on a classroom PC (BR-4TASK2). Shared
+    // devices lose nothing: shared IS the default this falls back to.
+    await _prefs.remove(_pendingSharedKey);
   }
 
   static DateTime? _parseIso(dynamic value) {

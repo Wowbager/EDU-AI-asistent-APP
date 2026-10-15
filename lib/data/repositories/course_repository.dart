@@ -1,7 +1,12 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:uuid/uuid.dart';
 
 import '../../core/connectivity/connectivity_service.dart';
 import '../../core/database/app_database.dart';
+import '../../core/media/course_image_urls.dart';
+import '../../core/media/lesson_image_cache.dart';
 import '../../core/sync/sync_queue.dart';
 import '../../core/sync/sync_status.dart';
 import '../datasources/local/bundled_courses_datasource.dart';
@@ -495,9 +500,18 @@ class CourseRepository {
       // This prevents bundled (e.g. v6) from overwriting a newer API download (v7).
       final existingVersion = existing.version;
       if (version >= existingVersion) {
-        await _localDataSource.updateCourseData(existing.id, bundledData);
+        await _localDataSource.updateCourseData(
+            existing.id, _keepServerCover(bundledData, existing.data));
         await _localDataSource.updateCourse(id: existing.id, version: version);
-      } else {
+      } else if (!_dataHasLessons(existing.data)) {
+        // The existing row carries no real content — a metadata-only catalog
+        // row seeded by sync (`data = '{}'`) or an interrupted download. Restore
+        // bundled content as a stopgap so the course is at least openable
+        // offline instead of rendering the "corrupted" screen. Keep the higher
+        // server version so a later R2 download still fetches the authoritative
+        // newer content.
+        await _localDataSource.updateCourseData(
+            existing.id, _keepServerCover(bundledData, existing.data));
       }
 
       // Re-fetch to get current data (either updated or preserved)
@@ -603,6 +617,67 @@ class CourseRepository {
     }
   }
 
+  /// Bring a course's stored content up to the server's latest version before
+  /// it is opened. Returns true when newer content was downloaded and stored.
+  ///
+  /// Compares the version inside the stored content, not `courses.version`:
+  /// sync bumps the latter from the catalog without fetching any content, and
+  /// the bundled repair in [_importBundledCourse] keeps the server's higher
+  /// version over bundled lessons — so the row's number can claim content it
+  /// does not hold. A bundled row the first sync has not linked yet (no
+  /// serverId) is matched to its server course by `course_id` (BR-6CEUUB).
+  ///
+  /// Silently returns false if offline or the API fails; what is on the device
+  /// stays as it is.
+  Future<bool> refreshOutdatedContent(String localId) async {
+    final course = await _localDataSource.getCourseById(localId);
+    if (course == null) return false;
+
+    final isOnline = await _connectivity.isOnline;
+    if (!isOnline) return false;
+
+    try {
+      RemoteCourse? remoteCourse;
+      if (course.serverId != null) {
+        final result = await _remoteDataSource.getCourse(course.serverId!);
+        if (result.isSuccess) remoteCourse = result.data;
+      } else {
+        final result = await _remoteDataSource.getAllCourses();
+        if (result.isSuccess) {
+          remoteCourse = result.data
+              ?.where((c) => c.courseId == course.courseId)
+              .firstOrNull;
+        }
+      }
+      if (remoteCourse == null) return false;
+
+      final storedVersion = _contentVersion(course.data) ?? course.version;
+      if (remoteCourse.version <= storedVersion) return false;
+
+      final download = await _remoteDataSource.downloadCourseJson(remoteCourse.id);
+      if (download.isFailure || download.data == null) return false;
+      if (!_validateCourseJson(download.data!)) return false;
+
+      // Metadata and content land together, so the row never carries a
+      // version its lessons do not match.
+      await _localDataSource.upsertFromServer(
+        serverId: remoteCourse.id,
+        courseId: remoteCourse.courseId,
+        name: remoteCourse.name,
+        version: remoteCourse.version,
+        status: remoteCourse.status,
+        language: remoteCourse.language,
+        data: download.data!,
+        serverUpdatedAt: remoteCourse.updatedAt,
+        existingLocalId: localId,
+      );
+      return true;
+    } catch (e, st) {
+      silentLog('course_repository', e, st);
+      return false;
+    }
+  }
+
   /// Download full course JSON from R2 and update local storage.
   /// If online, checks server for a newer version first.
   /// Falls back to bundled data, then R2 download.
@@ -656,6 +731,7 @@ class CourseRepository {
         return false;
       }
       await _localDataSource.updateCourseData(localId, bundledData);
+      _cacheImages(bundledData);
       return true;
     }
     if (bundledData != null) {
@@ -666,6 +742,7 @@ class CourseRepository {
       // Offline or no server ID — fall back to bundled if available (even if stale)
       if (bundledData != null && _validateCourseJson(bundledData)) {
         await _localDataSource.updateCourseData(localId, bundledData);
+        _cacheImages(bundledData);
         return true;
       }
       return false;
@@ -677,6 +754,7 @@ class CourseRepository {
       // API failed — fall back to bundled if available
       if (bundledData != null && _validateCourseJson(bundledData)) {
         await _localDataSource.updateCourseData(localId, bundledData);
+        _cacheImages(bundledData);
         return true;
       }
       return false;
@@ -689,8 +767,61 @@ class CourseRepository {
 
     // Update local course with full data (without changing sync status)
     await _localDataSource.updateCourseData(localId, result.data!);
+    _cacheImages(result.data!);
 
     return true;
+  }
+
+  /// Downloads the course's pictures in the background, so it still has them
+  /// offline — the JSON alone only carries their URLs (BR-BX9AA4). Never
+  /// awaited: the course is usable the moment its text is stored.
+  void _cacheImages(Map<String, dynamic> courseData) {
+    unawaited(LessonImageCache.instance.prefetch(courseImageUrls(courseData)));
+  }
+
+  /// Whether a raw course `data` JSON string carries at least one lesson.
+  /// A metadata-only catalog row (`{}`) or an interrupted download has none,
+  /// which is what drives CourseDetailPage's "corrupted course" screen.
+  bool _dataHasLessons(String rawData) {
+    try {
+      final data = jsonDecode(rawData) as Map<String, dynamic>;
+      final lessons = data['lessons'];
+      return lessons is List && lessons.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// [bundledData] with the cover (`header_image`) already stored in
+  /// [existingRawData] carried over. The bundled JSON has no cover; the one
+  /// in the row came from the server (sync or the Knihovna listing), and
+  /// laying bundled content back down on every start must not drop it
+  /// (BR-NZ7JUN).
+  Map<String, dynamic> _keepServerCover(
+    Map<String, dynamic> bundledData,
+    String existingRawData,
+  ) {
+    if (bundledData['header_image'] != null) return bundledData;
+    try {
+      final existing = jsonDecode(existingRawData);
+      final cover = existing is Map ? existing['header_image'] : null;
+      if (cover == null) return bundledData;
+      return {...bundledData, 'header_image': cover};
+    } catch (_) {
+      return bundledData;
+    }
+  }
+
+  /// The `version` a raw course `data` JSON string carries — the version of
+  /// the content itself, as exported to R2 or bundled. Null for a
+  /// metadata-only row (`{}`) or unreadable data.
+  int? _contentVersion(String rawData) {
+    try {
+      final data = jsonDecode(rawData) as Map<String, dynamic>;
+      return (data['version'] as num?)?.toInt();
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Validate that course JSON has the expected structure:

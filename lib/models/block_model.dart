@@ -3,7 +3,10 @@
 /// Blocks contain steps which are the atomic units of content display.
 /// Steps can be static (pre-defined) or AI-scaffolded (generated).
 
+import 'dart:math';
+
 import '../core/strings/app_strings.dart';
+import '../core/utils/content_format.dart';
 
 /// Type of block
 enum BlockType {
@@ -79,6 +82,18 @@ extension BlockTypeExtension on BlockType {
       this == BlockType.question ||
       this == BlockType.exercise ||
       this == BlockType.quiz;
+
+  /// Whether a wrong answer here may auto-seed a practice card.
+  ///
+  /// Only `exercise` blocks do (BR-TF9ZKD). A `question` block is an in-lesson
+  /// check or a survey — a wrong (or simply unexpected) answer there must not
+  /// push the block into Procvičování. Legacy `quiz` maps to `question` in V2
+  /// (see [BlockType]), so it is excluded for the same reason.
+  ///
+  /// This gates only the automatic path. A manual bookmark and an
+  /// admin-configured `default_practice` block still seed a card whatever the
+  /// type — those are deliberate opt-ins.
+  bool get seedsPracticeOnWrong => this == BlockType.exercise;
 
   /// Whether this is a new atomic block type (no steps)
   bool get isAtomicType =>
@@ -283,6 +298,84 @@ class StepImage {
   }
 }
 
+/// Attempts an AI-guided question grants before the solution is revealed
+/// (BR-V9TQA7). Mirrors `GUIDED_DEFAULT_ATTEMPTS` in the admin editor, so an
+/// unset field and an explicit 3 behave the same.
+const int kDefaultGuidedAttempts = 3;
+
+/// Read `ai_guided_attempts` off authored JSON.
+///
+/// Clamped rather than trusted: a 0 would reveal the solution before the first
+/// submission, which is the exact behaviour the switch exists to prevent, and
+/// an absurd ceiling would leave the student with no way out of the loop.
+int parseGuidedAttempts(dynamic raw) {
+  final value = (raw as num?)?.toInt();
+  if (value == null) return kDefaultGuidedAttempts;
+  return value.clamp(1, 10);
+}
+
+/// Resolve the shuffle tri-state (`shuffle_options` over the course-level
+/// `shuffle_answers`) into the plain bool the view layer reads.
+///
+/// True/false never shuffles, whatever the course or the question says
+/// (BR-K3D8MP): Ano/Ne is a fixed pair of buttons that must stay where the
+/// learner expects them, not a list of alternatives to read through.
+bool resolveShuffleOptions(
+  String type, {
+  bool? perQuestion,
+  bool courseDefault = false,
+}) =>
+    type != 'true_false' && (perQuestion ?? courseDefault);
+
+/// One rubric line for an AI-evaluated open question (BR-P745Q8).
+///
+/// Criteria are a layer on top of the expected answer, not a replacement: the
+/// expected answer stays the primary reference and these say what the feedback
+/// has to walk through. The app never evaluates against them itself — it ships
+/// them to the API — so this is a transport model, and [id] matters because the
+/// per-criterion scores come back keyed by it.
+class QuestionCriterion {
+  final String id;
+  final String name;
+  final String description;
+  final int weight;
+
+  const QuestionCriterion({
+    required this.id,
+    required this.name,
+    this.description = '',
+    this.weight = 0,
+  });
+
+  factory QuestionCriterion.fromJson(Map<String, dynamic> json) {
+    return QuestionCriterion(
+      id: json['id'] as String? ?? '',
+      name: json['name'] as String? ?? '',
+      description: json['description'] as String? ?? '',
+      weight: (json['weight'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    if (description.isNotEmpty) 'description': description,
+    'weight': weight,
+  };
+
+  /// Parse a `ai_criteria_list` array, dropping unnamed entries and capping at
+  /// the four the admin editor allows.
+  static List<QuestionCriterion> listFromJson(dynamic raw) {
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(QuestionCriterion.fromJson)
+        .where((c) => c.name.trim().isNotEmpty)
+        .take(4)
+        .toList();
+  }
+}
+
 /// Evaluation configuration for evaluation steps
 class EvaluationConfig {
   final String type;  // single_select, multi_select, free_text, matching, multiple_choice, open, true_false
@@ -297,6 +390,33 @@ class EvaluationConfig {
   final StepImage? solutionImage;  // Image alongside solution text
   final double? correctNumber;  // For numeric questions
   final double tolerance;       // Tolerance for numeric comparison (default 0)
+  final bool aiEvaluation;      // Open questions: show the AI's feedback (grading is always AI, BR-N26ACB)
+  final String? aiCriteria;     // Legacy free-text grading rules (BR-FFVVYR)
+  final List<QuestionCriterion> aiCriteriaList;  // Structured rubric (BR-P745Q8)
+
+  /// AI-guided solving (BR-V9TQA7): hold back [solution] while the student
+  /// still has attempts left.
+  ///
+  /// The reveal is what the author's explanation is *for*, so switching it off
+  /// entirely would be the wrong lever — the point is to spend the attempts
+  /// first. Only meaningful with [aiEvaluation] on, and only outside quiz mode,
+  /// which allows a single attempt by design.
+  final bool aiGuided;
+
+  /// How many submissions the student gets before [solution] is revealed.
+  /// Clamped on parse — a zero would reveal the answer before the first try.
+  final int aiGuidedAttempts;
+
+  /// Open questions: whether the student may photograph a solution worked out
+  /// on paper. When false the attach affordance is not rendered at all — the
+  /// brief is explicit that it must not merely be disabled.
+  final bool allowPhoto;
+  /// Already resolved against the course-level `shuffle_answers` default — the
+  /// tri-state lives only in the JSON, everything downstream sees a plain bool.
+  /// The shuffle itself happens in the view layer, not here (see
+  /// [shuffledOptions]): parsing runs on rebuild-heavy paths, so shuffling at
+  /// parse time would reorder options mid-question.
+  final bool shuffleOptions;
 
   const EvaluationConfig({
     required this.type,
@@ -311,7 +431,66 @@ class EvaluationConfig {
     this.solutionImage,
     this.correctNumber,
     this.tolerance = 0,
+    this.aiEvaluation = false,
+    this.aiCriteria,
+    this.aiCriteriaList = const [],
+    this.aiGuided = false,
+    this.aiGuidedAttempts = kDefaultGuidedAttempts,
+    this.allowPhoto = false,
+    this.shuffleOptions = false,
   });
+
+  EvaluationConfig copyWith({
+    String? type,
+    List<EvaluationOption>? options,
+    String? correctAnswer,
+    List<String>? correctOptionIds,
+    String? question,
+    String? solution,
+    bool? allowMultiple,
+    bool? showAnswers,
+    bool? showSolution,
+    StepImage? solutionImage,
+    double? correctNumber,
+    double? tolerance,
+    bool? shuffleOptions,
+    bool? aiEvaluation,
+    String? aiCriteria,
+    List<QuestionCriterion>? aiCriteriaList,
+    bool? aiGuided,
+    int? aiGuidedAttempts,
+    bool? allowPhoto,
+  }) {
+    return EvaluationConfig(
+      type: type ?? this.type,
+      options: options ?? this.options,
+      correctAnswer: correctAnswer ?? this.correctAnswer,
+      correctOptionIds: correctOptionIds ?? this.correctOptionIds,
+      question: question ?? this.question,
+      solution: solution ?? this.solution,
+      allowMultiple: allowMultiple ?? this.allowMultiple,
+      showAnswers: showAnswers ?? this.showAnswers,
+      showSolution: showSolution ?? this.showSolution,
+      solutionImage: solutionImage ?? this.solutionImage,
+      correctNumber: correctNumber ?? this.correctNumber,
+      tolerance: tolerance ?? this.tolerance,
+      shuffleOptions: shuffleOptions ?? this.shuffleOptions,
+      aiEvaluation: aiEvaluation ?? this.aiEvaluation,
+      aiCriteria: aiCriteria ?? this.aiCriteria,
+      aiCriteriaList: aiCriteriaList ?? this.aiCriteriaList,
+      aiGuided: aiGuided ?? this.aiGuided,
+      aiGuidedAttempts: aiGuidedAttempts ?? this.aiGuidedAttempts,
+      allowPhoto: allowPhoto ?? this.allowPhoto,
+    );
+  }
+
+  /// A display-order copy of [options], randomized when [shuffleOptions] is on.
+  /// Call this once from a `State` (never from `build`) — the caller owns the
+  /// order for as long as the question is on screen.
+  List<EvaluationOption> shuffledOptions([Random? random]) {
+    if (!shuffleOptions || options.length < 2) return options;
+    return List<EvaluationOption>.from(options)..shuffle(random ?? Random());
+  }
 
   factory EvaluationConfig.fromJson(Map<String, dynamic> json) {
     List<EvaluationOption> options = [];
@@ -347,6 +526,16 @@ class EvaluationConfig {
       solutionImage: solutionImage,
       correctNumber: (json['correct_number'] as num?)?.toDouble(),
       tolerance: (json['tolerance'] as num?)?.toDouble() ?? 0,
+      aiEvaluation: json['ai_evaluation'] as bool? ?? false,
+      aiCriteria: json['ai_criteria'] as String?,
+      aiCriteriaList: QuestionCriterion.listFromJson(json['ai_criteria_list']),
+      aiGuided: json['ai_guided'] as bool? ?? false,
+      aiGuidedAttempts: parseGuidedAttempts(json['ai_guided_attempts']),
+      allowPhoto: json['allow_photo'] as bool? ?? false,
+      shuffleOptions: resolveShuffleOptions(
+        json['type'] as String? ?? 'single_select',
+        perQuestion: json['shuffle_options'] as bool?,
+      ),
     );
   }
 }
@@ -376,6 +565,33 @@ class EvaluationOption {
     this.goTo,
     this.scoreKoef = 1.0,
   });
+
+  /// What the student sees on the option.
+  ///
+  /// The admin editor seeds a true/false question with "True (Ano)" /
+  /// "False (Ne)" and has no field to change it, so that text is a stand-in,
+  /// not the author's wording — printed as is, every student got the same
+  /// half-English label (BR-PJUUZZ). Those two options, and blank ones, take
+  /// a label in the app's language instead. The stored [text] stays as it is:
+  /// older app builds still render it.
+  String get label {
+    final unlabelled =
+        text.trim().isEmpty || text == _adminTrueFalseText[id];
+    if (!unlabelled) return text;
+    switch (id) {
+      case 'true':
+        return AppStrings.trueFalseTrue;
+      case 'false':
+        return AppStrings.trueFalseFalse;
+    }
+    return text;
+  }
+
+  /// Mirrors initTrueFalseOptions in the admin's QuestionStepEditor.tsx.
+  static const _adminTrueFalseText = {
+    'true': 'True (Ano)',
+    'false': 'False (Ne)',
+  };
 
   factory EvaluationOption.fromJson(Map<String, dynamic> json) {
     StepImage? feedbackImage;
@@ -530,6 +746,15 @@ class FsrsParameters {
   final DateTime? lastReview;
   final DateTime? dueDate;
 
+  /// Queue priority weight authored in the admin block editor
+  /// (block.fsrs.weight). Null when unset — callers apply the default (5.0).
+  final double? weight;
+
+  /// Authoring-time skip expression, e.g. "GPF_mastery > 0.8" — when the
+  /// student's mastery satisfies it, the block is skipped in the practice
+  /// queue (evaluated by SkipConditionEvaluator).
+  final String? skipCondition;
+
   const FsrsParameters({
     this.stability = 0.0,
     this.difficulty = 0.0,
@@ -537,12 +762,15 @@ class FsrsParameters {
     this.lapses = 0,
     this.lastReview,
     this.dueDate,
+    this.weight,
+    this.skipCondition,
   });
 
   factory FsrsParameters.fromJson(Map<String, dynamic> json) {
     return FsrsParameters(
       stability: (json['stability'] as num?)?.toDouble() ?? 0.0,
       difficulty: (json['difficulty'] as num?)?.toDouble() ?? 0.0,
+      weight: (json['weight'] as num?)?.toDouble(),
       reps: json['reps'] as int? ?? 0,
       lapses: json['lapses'] as int? ?? 0,
       lastReview: json['last_review'] != null
@@ -550,6 +778,10 @@ class FsrsParameters {
           : null,
       dueDate: json['due_date'] != null
           ? DateTime.tryParse(json['due_date'] as String)
+          : null,
+      skipCondition: (json['skip_condition'] as String?)?.trim().isNotEmpty ==
+              true
+          ? (json['skip_condition'] as String).trim()
           : null,
     );
   }
@@ -631,9 +863,39 @@ class BlockStep {
     this.defaultPractice = false,
   });
 
+  BlockStep copyWith({
+    EvaluationConfig? evaluationConfig,
+  }) {
+    return BlockStep(
+      stepId: stepId,
+      type: type,
+      mode: mode,
+      content: content,
+      evaluationConfig: evaluationConfig ?? this.evaluationConfig,
+      userOptions: userOptions,
+      nextActions: nextActions,
+      outputFormat: outputFormat,
+      hint: hint,
+      help: help,
+      image: image,
+      video: video,
+      audio: audio,
+      position: position,
+      goTo: goTo,
+      defaultPractice: defaultPractice,
+    );
+  }
+
   /// Parse a step from JSON with the step ID provided separately.
   /// The actual JSON format has steps as a Map with keys like "s1", "s2".
-  factory BlockStep.fromJsonWithId(String stepId, Map<String, dynamic> json) {
+  ///
+  /// [courseShuffleDefault] is `CourseV2.shuffle_answers`; a question that
+  /// carries its own `shuffle_options` overrides it.
+  factory BlockStep.fromJsonWithId(
+    String stepId,
+    Map<String, dynamic> json, {
+    bool courseShuffleDefault = false,
+  }) {
 
     List<UserOption> userOptions = [];
     if (json['user_options'] != null) {
@@ -795,6 +1057,12 @@ class BlockStep {
           correctAnswer: acceptedAnswers?.isNotEmpty == true ? acceptedAnswers!.first : null,
           options: evalOptions,
           solution: solutionText,
+          aiEvaluation: question?['ai_evaluation'] as bool? ?? false,
+          aiCriteria: question?['ai_criteria'] as String?,
+          aiCriteriaList: QuestionCriterion.listFromJson(question?['ai_criteria_list']),
+          aiGuided: question?['ai_guided'] as bool? ?? false,
+          aiGuidedAttempts: parseGuidedAttempts(question?['ai_guided_attempts']),
+          allowPhoto: question?['allow_photo'] as bool? ?? false,
         );
       }
 
@@ -803,8 +1071,10 @@ class BlockStep {
     } else {
       // For display/hint/solution steps
       // Determine content type based on outputFormat or presence of HTML tags
+      // A bare `<` is not a tag — `5 < 10` and markdown quotes must stay text.
       final isHtml = outputFormat == OutputFormat.htmlText ||
-                     (outputFormat == OutputFormat.plainText && outputText?.contains('<') == true);
+                     (outputFormat == OutputFormat.plainText &&
+                      outputText != null && looksLikeHtml(outputText));
       final isMarkdown = outputFormat == OutputFormat.markdown;
       // Extract image URL from static mode (with safe type checks)
       final imageUrlRaw = staticMode?['image_url'];
@@ -920,8 +1190,35 @@ class BlockStep {
           showAnswers: qShowAnswers,
           showSolution: qShowSolution,
           solutionImage: solImage,
+          // Numeric questions grade against these — without them
+          // correctNumber stays null and every answer scores as wrong.
+          correctNumber: (questionMap['correct_number'] as num?)?.toDouble(),
+          tolerance: (questionMap['tolerance'] as num?)?.toDouble() ?? 0,
+          aiEvaluation: questionMap['ai_evaluation'] as bool? ?? false,
+          aiCriteria: questionMap['ai_criteria'] as String?,
+          aiCriteriaList: QuestionCriterion.listFromJson(questionMap['ai_criteria_list']),
+          aiGuided: questionMap['ai_guided'] as bool? ?? false,
+          aiGuidedAttempts: parseGuidedAttempts(questionMap['ai_guided_attempts']),
+          allowPhoto: questionMap['allow_photo'] as bool? ?? false,
         );
       }
+    }
+
+    // Resolve the shuffle tri-state once, here, rather than in each of the
+    // branches above (V2 question steps, legacy evaluation steps, user_options
+    // fallback) — they all funnel into `evaluationConfig`.
+    if (evaluationConfig != null) {
+      final questionRaw = json['question'];
+      final perQuestion = questionRaw is Map<String, dynamic>
+          ? questionRaw['shuffle_options'] as bool?
+          : null;
+      evaluationConfig = evaluationConfig.copyWith(
+        shuffleOptions: resolveShuffleOptions(
+          evaluationConfig.type,
+          perQuestion: perQuestion,
+          courseDefault: courseShuffleDefault,
+        ),
+      );
     }
 
     return BlockStep(
@@ -944,10 +1241,17 @@ class BlockStep {
     );
   }
 
-  factory BlockStep.fromJson(Map<String, dynamic> json) {
+  factory BlockStep.fromJson(
+    Map<String, dynamic> json, {
+    bool courseShuffleDefault = false,
+  }) {
     // V2 uses 'id', legacy uses 'step_id'
     final stepId = json['id'] as String? ?? json['step_id'] as String? ?? '';
-    return BlockStep.fromJsonWithId(stepId, json);
+    return BlockStep.fromJsonWithId(
+      stepId,
+      json,
+      courseShuffleDefault: courseShuffleDefault,
+    );
   }
 
   /// Get the display title for this step
@@ -1055,6 +1359,14 @@ class AtomicQuestion {
   final bool showSolution;  // Whether to show solution explanation after answering (default true)
   final String? solution;  // Explanation shown after answering
   final bool allowMultiple;  // For multiple_choice: allow selecting multiple options
+  final bool aiEvaluation;   // Open questions: show the AI's feedback (grading is always AI, BR-N26ACB)
+  final String? aiCriteria;  // Legacy free-text grading rules (BR-FFVVYR)
+  final List<QuestionCriterion> aiCriteriaList;  // Structured rubric (BR-P745Q8)
+  /// Open questions: whether a photographed answer is offered at all.
+  final bool allowPhoto;
+  /// Already resolved against the course-level `shuffle_answers` default.
+  /// See [EvaluationConfig.shuffleOptions] — the shuffle runs in the view layer.
+  final bool shuffleOptions;
 
   const AtomicQuestion({
     required this.type,
@@ -1064,9 +1376,43 @@ class AtomicQuestion {
     this.showSolution = true,
     this.solution,
     this.allowMultiple = false,
+    this.aiEvaluation = false,
+    this.aiCriteria,
+    this.aiCriteriaList = const [],
+    this.allowPhoto = false,
+    this.shuffleOptions = false,
   });
 
-  factory AtomicQuestion.fromJson(Map<String, dynamic> json) {
+  AtomicQuestion copyWith({
+    bool? showSolution,
+  }) {
+    return AtomicQuestion(
+      type: type,
+      options: options,
+      correctAnswer: correctAnswer,
+      showAnswers: showAnswers,
+      showSolution: showSolution ?? this.showSolution,
+      solution: solution,
+      allowMultiple: allowMultiple,
+      aiEvaluation: aiEvaluation,
+      aiCriteria: aiCriteria,
+      aiCriteriaList: aiCriteriaList,
+      allowPhoto: allowPhoto,
+      shuffleOptions: shuffleOptions,
+    );
+  }
+
+  /// A display-order copy of [options], randomized when [shuffleOptions] is on.
+  /// Call once from a `State`, never from `build`.
+  List<EvaluationOption> shuffledOptions([Random? random]) {
+    if (!shuffleOptions || options.length < 2) return options;
+    return List<EvaluationOption>.from(options)..shuffle(random ?? Random());
+  }
+
+  factory AtomicQuestion.fromJson(
+    Map<String, dynamic> json, {
+    bool courseShuffleDefault = false,
+  }) {
     List<EvaluationOption> options = [];
     if (json['options'] != null && json['options'] is List) {
       options = (json['options'] as List<dynamic>)
@@ -1074,14 +1420,24 @@ class AtomicQuestion {
           .toList();
     }
 
+    final type = json['type'] as String? ?? 'multiple_choice';
     return AtomicQuestion(
-      type: json['type'] as String? ?? 'multiple_choice',
+      type: type,
       options: options,
       correctAnswer: json['correct_answer'] as String?,
+      shuffleOptions: resolveShuffleOptions(
+        type,
+        perQuestion: json['shuffle_options'] as bool?,
+        courseDefault: courseShuffleDefault,
+      ),
       showAnswers: json['show_answers'] as bool? ?? true,
       showSolution: json['show_solution'] as bool? ?? true,
       solution: json['solution'] as String?,
       allowMultiple: json['allow_multiple'] as bool? ?? false,
+      aiEvaluation: json['ai_evaluation'] as bool? ?? false,
+      aiCriteria: json['ai_criteria'] as String?,
+      aiCriteriaList: QuestionCriterion.listFromJson(json['ai_criteria_list']),
+      allowPhoto: json['allow_photo'] as bool? ?? false,
     );
   }
 
@@ -1158,7 +1514,13 @@ class ContentBlock {
   /// Whether this block uses the new atomic format (no steps)
   bool get isAtomicFormat => type.isAtomicType && steps.isEmpty;
 
-  factory ContentBlock.fromJson(Map<String, dynamic> json) {
+  /// [courseShuffleDefault] carries `CourseV2.shuffle_answers` down to the
+  /// questions — blocks are parsed from the course JSON, so this is the only
+  /// point where course-level context is still in scope.
+  factory ContentBlock.fromJson(
+    Map<String, dynamic> json, {
+    bool courseShuffleDefault = false,
+  }) {
     final blockType = BlockTypeExtension.fromString(json['type'] as String? ?? 'learning');
 
     // Parse duration - can be string like "5 min" or int
@@ -1220,7 +1582,10 @@ class ContentBlock {
       AtomicQuestion? question;
       final questionData = json['question'];
       if (questionData is Map<String, dynamic>) {
-        question = AtomicQuestion.fromJson(questionData);
+        question = AtomicQuestion.fromJson(
+          questionData,
+          courseShuffleDefault: courseShuffleDefault,
+        );
       }
 
       return ContentBlock(
@@ -1253,12 +1618,16 @@ class ContentBlock {
             return BlockStep.fromJsonWithId(
               key,
               stepsData[key] as Map<String, dynamic>,
+              courseShuffleDefault: courseShuffleDefault,
             );
           }).toList();
         } else if (stepsData is List<dynamic>) {
           // Steps as List
           steps = stepsData
-              .map((s) => BlockStep.fromJson(s as Map<String, dynamic>))
+              .map((s) => BlockStep.fromJson(
+                    s as Map<String, dynamic>,
+                    courseShuffleDefault: courseShuffleDefault,
+                  ))
               .toList();
         }
       }
@@ -1329,29 +1698,62 @@ class ContentBlock {
     return currentStep?.displayText ?? '';
   }
 
-  /// Get hint for the current block/step (if available)
-  String? get currentHint {
-    if (isAtomicFormat) return atomicHint;
-    // Step-level hint first, then block-level fallback (exercise blocks)
-    return currentStep?.hint ?? atomicHint;
+  /// The step carrying [stepId], or null for an atomic block / unknown id.
+  BlockStep? stepById(String? stepId) {
+    if (stepId == null) return null;
+    for (final step in steps) {
+      if (step.stepId == stepId) return step;
+    }
+    return null;
   }
+
+  /// Hint for the step [stepId], with the block's shared hint as fallback.
+  ///
+  /// A step that carries its own hint always wins over the block-level one —
+  /// writing a hint on a single step is how an author says "for this step, show
+  /// this instead" (BR-JHDNB3). `hint` and `help` fall back independently, so a
+  /// step may override only one of the two.
+  ///
+  /// Takes the step as an argument rather than reading `currentStepIndex`:
+  /// BlockStepEngine owns the live step index and the block's own cursor stays
+  /// frozen at 0, so every cursor-based read answered for the wrong step.
+  String? hintForStep(String? stepId) {
+    final stepHint = stepById(stepId)?.hint;
+    if (stepHint != null && stepHint.isNotEmpty) return stepHint;
+    return atomicHint;
+  }
+
+  /// Help for the step [stepId], with the block's shared help as fallback.
+  /// See [hintForStep] for why the step is passed in.
+  String? helpForStep(String? stepId) {
+    final stepHelp = stepById(stepId)?.help;
+    if (stepHelp != null && stepHelp.isNotEmpty) return stepHelp;
+    return atomicHelp;
+  }
+
+  /// Whether [stepId] has a hint to show (its own, or the block's shared one).
+  bool hasHintForStep(String? stepId) {
+    final hint = hintForStep(stepId);
+    return hint != null && hint.isNotEmpty;
+  }
+
+  /// Whether [stepId] has help to reveal (its own, or the block's shared one).
+  bool hasHelpForStep(String? stepId) {
+    final help = helpForStep(stepId);
+    return help != null && help.isNotEmpty;
+  }
+
+  /// Get hint for the current block/step (if available)
+  String? get currentHint => hintForStep(currentStep?.stepId);
 
   /// Get help for the current block/step (if available)
-  String? get currentHelp {
-    if (isAtomicFormat) return atomicHelp;
-    // Step-level help first, then block-level fallback (exercise blocks)
-    return currentStep?.help ?? atomicHelp;
-  }
+  String? get currentHelp => helpForStep(currentStep?.stepId);
 
   /// Check if block has a hint
-  bool get hasHint {
-    return currentHint != null && currentHint!.isNotEmpty;
-  }
+  bool get hasHint => hasHintForStep(currentStep?.stepId);
 
   /// Check if block has help
-  bool get hasHelp {
-    return currentHelp != null && currentHelp!.isNotEmpty;
-  }
+  bool get hasHelp => hasHelpForStep(currentStep?.stepId);
 
   /// Get the question configuration (for question blocks)
   AtomicQuestion? get question => atomicQuestion;
@@ -1420,6 +1822,8 @@ class ContentBlock {
 
   /// Create a copy with updated values
   ContentBlock copyWith({
+    List<BlockStep>? steps,
+    AtomicQuestion? atomicQuestion,
     bool? isCompleted,
     bool? isBookmarked,
     bool? isLiked,
@@ -1436,13 +1840,13 @@ class ContentBlock {
       gpf: gpf,
       learning: learning,
       fsrs: fsrs,
-      steps: steps,
+      steps: steps ?? this.steps,
       content: content,
       atomicHint: atomicHint,
       atomicHelp: atomicHelp,
       atomicImage: atomicImage,
       atomicVideo: atomicVideo,
-      atomicQuestion: atomicQuestion,
+      atomicQuestion: atomicQuestion ?? this.atomicQuestion,
       defaultPractice: defaultPractice ?? this.defaultPractice,
       isCompleted: isCompleted ?? this.isCompleted,
       isBookmarked: isBookmarked ?? this.isBookmarked,
@@ -1550,7 +1954,10 @@ class BlockLoader {
       for (final b in blocks) {
         final blockJson = b as Map<String, dynamic>;
         if (blockJson['block_id'] == blockId) {
-          final block = ContentBlock.fromJson(blockJson);
+          final block = ContentBlock.fromJson(
+            blockJson,
+            courseShuffleDefault: courseData['shuffle_answers'] == true,
+          );
           final bindingPractice = practiceFlags[blockId] ?? false;
           result.add(block.defaultPractice || bindingPractice
               ? block.copyWith(defaultPractice: true)
@@ -1619,7 +2026,10 @@ class BlockLoader {
         final blockJson = b as Map<String, dynamic>;
         if (blockJson['block_id'] == binding.blockId) {
           result.add((
-            block: ContentBlock.fromJson(blockJson),
+            block: ContentBlock.fromJson(
+              blockJson,
+              courseShuffleDefault: courseData['shuffle_answers'] == true,
+            ),
             binding: binding,
           ));
           break;

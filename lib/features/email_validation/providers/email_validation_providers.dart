@@ -3,8 +3,11 @@ import 'dart:convert';
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/consent/minor_mode.dart';
 import '../../../core/database/app_database.dart';
+import '../../../core/providers/bookmark_provider.dart';
 import '../../../core/providers/core_providers.dart';
+import '../../../core/providers/practice_providers.dart';
 import '../../../core/strings/app_strings.dart';
 import '../data/email_validation_repository.dart';
 import 'package:eduai/core/util/silent_log.dart';
@@ -63,8 +66,14 @@ class EmailVerificationSuccess extends EmailVerificationState {
     this.user,
   });
 
-  /// Whether profile setup is needed (new user or existing user without name).
-  bool get needsProfileSetup => isNewUser || user?.name == null || user!.name.isEmpty;
+  /// Whether this login stops at the sign-up onboarding.
+  ///
+  /// The account's own `onboarded_at` is the authority — an account that has
+  /// been through the onboarding is never asked again, on any device
+  /// (BR-YXVMKY). A registration has no account to ask yet ([isNewUser]), and
+  /// an existing account whose `/api/user` fetch failed arrives here with a
+  /// null [user]; both still owe the onboarding.
+  bool get needsProfileSetup => isNewUser || !(user?.hasOnboarded ?? false);
 }
 
 /// Verification failed with error.
@@ -97,11 +106,62 @@ class EmailVerificationNotifier extends StateNotifier<EmailVerificationState> {
   final Ref _ref;
   String? _currentEmail;
 
+  /// The e-mail whose registration already passed the caller's gate in
+  /// [screenNewAccount], before any code was sent. [verifyCode] does not ask
+  /// again for it.
+  String? _screenedNewEmail;
+
   EmailVerificationNotifier(this._repository, this._ref)
       : super(const EmailVerificationInitial());
 
   /// Get the current email being verified.
   String? get currentEmail => _currentEmail;
+
+  /// Runs before a code is sent: an e-mail that already has an account goes
+  /// straight on to its sign-in code, an unknown one meets [onNewAccount]
+  /// first. Returns false when the gate stopped the flow — nothing has been
+  /// sent to anyone at that point.
+  ///
+  /// The code used to go out first and the age gate only came after it was
+  /// typed in, so a new e-mail looked no different from a sign-in: straight to
+  /// the code screen, no age question (BR-J2WJEQ).
+  ///
+  /// When the server cannot say (offline, error, timeout) this lets the flow
+  /// through unscreened, and [verifyCode]'s own `onNewAccount` stays the
+  /// safety net for the registration branch.
+  Future<bool> screenNewAccount(
+    String email, {
+    Future<bool> Function()? onNewAccount,
+  }) async {
+    _screenedNewEmail = null;
+    if (onNewAccount == null) return true;
+
+    state = EmailVerificationLoading(AppStrings.emailCheckingAccount);
+    bool? exists;
+    try {
+      final result = await _repository
+          .checkEmailExists(email)
+          .timeout(const Duration(seconds: 15));
+      if (result.isSuccess) exists = result.data;
+    } catch (e, st) {
+      silentLog('email_validation_providers', e, st);
+    }
+    // Back to where the caller started: sending the code is its next step.
+    state = const EmailVerificationInitial();
+    if (exists != false) return true;
+
+    if (!await onNewAccount()) return false;
+    _screenedNewEmail = _normalize(email);
+    return true;
+  }
+
+  /// Whether [email]'s registration already passed the gate in
+  /// [screenNewAccount], so a later step that would create the account need
+  /// not ask again.
+  bool wasScreenedAsNew(String email) =>
+      _screenedNewEmail != null && _screenedNewEmail == _normalize(email);
+
+  static String _normalize(String email) => email.trim().toLowerCase();
 
   /// Send verification code to the specified email.
   Future<bool> sendCode(String email) async {
@@ -124,7 +184,17 @@ class EmailVerificationNotifier extends StateNotifier<EmailVerificationState> {
 
   /// Verify the code entered by the user.
   /// After code verification, checks if user exists and has a profile.
-  Future<bool> verifyCode(String code) async {
+  ///
+  /// [onNewAccount] is consulted only when the verified email turns out to
+  /// have no account behind it, i.e. when continuing would *register* rather
+  /// than sign in. Returning false abandons the flow before anything is
+  /// created (see the call site below). This is where the age gate hangs:
+  /// asking a returning user where they live and whether they are 15 is
+  /// pointless, their account passed that gate when it was made (BR-N9Y48J).
+  Future<bool> verifyCode(
+    String code, {
+    Future<bool> Function()? onNewAccount,
+  }) async {
     if (_currentEmail == null) {
       state = EmailVerificationError(
         type: EmailVerificationErrorType.unknown,
@@ -149,7 +219,16 @@ class EmailVerificationNotifier extends StateNotifier<EmailVerificationState> {
 
       final db = _ref.read(appDatabaseProvider);
       final activeUser = await db.getActiveUser();
-      final isGuestUpgrade = activeUser != null && activeUser.email.isEmpty;
+      // A minor also has an empty local email — indistinguishable from a
+      // guest by that test alone — but must never be "upgraded in place":
+      // that would overwrite their pseudonymous account's own local row with
+      // whatever email/name this verification carries (BR-8FDF37, decision
+      // 7). Excluding minors here falls through to the "different identity"
+      // branch below, which creates a fresh local user instead of mutating
+      // the minor's row.
+      final isGuestUpgrade = activeUser != null &&
+          activeUser.email.isEmpty &&
+          !_ref.read(minorModeProvider);
 
       // If verify returned a token, user already exists - fetch their profile
       if (verifyToken != null && verifyToken.isNotEmpty) {
@@ -184,6 +263,9 @@ class EmailVerificationNotifier extends StateNotifier<EmailVerificationState> {
               email: userData['email'] as String,
               avatarIndex: serverAvatarIndex,
               selectedSubjects: subjectsList,
+              onboardedAt: userData['onboarded_at'] != null
+                  ? DateTime.tryParse(userData['onboarded_at'] as String)
+                  : null,
             );
 
             if (isGuestUpgrade) {
@@ -202,6 +284,22 @@ class EmailVerificationNotifier extends StateNotifier<EmailVerificationState> {
             return true;
           }
         } catch (e, st) { silentLog('email_validation_providers', e, st); }
+      }
+
+      // A response without a token means no account exists for this email, so
+      // everything below creates one — the guest claim here, ProfileSetupPage
+      // after this. That is the moment the caller's gate applies, unless it
+      // already did before the code was sent ([screenNewAccount]). Test the
+      // token rather than the fallthrough: an existing user whose /api/user
+      // fetch merely failed also lands here, and they are still signing in.
+      if ((verifyToken == null || verifyToken.isEmpty) &&
+          onNewAccount != null &&
+          !wasScreenedAsNew(_currentEmail!) &&
+          !await onNewAccount()) {
+        // The caller took over (guardian consent) or backed out. Reset rather
+        // than report a success that never happened.
+        state = const EmailVerificationInitial();
+        return false;
       }
 
       // No token or fetch failed — new email registration
@@ -394,6 +492,24 @@ class EmailVerificationNotifier extends StateNotifier<EmailVerificationState> {
       final syncService = _ref.read(syncServiceProvider);
       await syncService.forceSync();
     } catch (e, st) { silentLog('email_validation_providers', e, st); }
+
+    // The post-login sync folds the merged account's courses, bookmarks and
+    // FSRS practice cards into the local DB (server-side UserMergeService plus
+    // the pull/seed passes). The dashboard's practice count and the bookmark
+    // cache are cached and don't recompute on their own, so refresh them here
+    // — otherwise the count stays stale (wrong) until the user opens a course
+    // (BR-YRT5ZM).
+    try {
+      final db = _ref.read(appDatabaseProvider);
+      final user = await db.getActiveUser();
+      if (user != null) {
+        await _ref.read(bookmarkProvider.notifier).initForUser(user.id);
+      }
+      _ref.invalidate(activeUserProvider);
+      _ref.invalidate(practiceQueueProvider);
+      _ref.invalidate(playablePracticeProvider);
+      _ref.invalidate(dueCardsCountProvider);
+    } catch (e, st) { silentLog('email_validation_providers', e, st); }
   }
 
   /// Resend the verification code.
@@ -405,6 +521,7 @@ class EmailVerificationNotifier extends StateNotifier<EmailVerificationState> {
   /// Reset to initial state.
   void reset() {
     _currentEmail = null;
+    _screenedNewEmail = null;
     state = const EmailVerificationInitial();
   }
 

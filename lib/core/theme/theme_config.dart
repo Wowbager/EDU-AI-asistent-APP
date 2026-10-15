@@ -107,6 +107,17 @@ class ThemeColors {
   // Gradient extras
   final Color gradientGold;
 
+  /// Top and bottom stops of the auth-flow background gradient. Kept separate
+  /// from [gradientPurple] / [primaryDark] so the gradient can match the design
+  /// exactly without shifting the text and button colours those two drive.
+  final Color authGradientTop;
+  final Color authGradientBottom;
+
+  // Bottom nav scrim — darkening gradient behind the floating nav bar so the
+  // white bar doesn't blend into light page content scrolling underneath it.
+  final Color navScrimTop;
+  final Color navScrimBottom;
+
   const ThemeColors({
     required this.primary,
     required this.primaryDark,
@@ -157,6 +168,11 @@ class ThemeColors {
     required this.skillRed,
     required this.skillBlue,
     required this.gradientGold,
+    required this.authGradientTop,
+    required this.authGradientBottom,
+
+    required this.navScrimTop,
+    required this.navScrimBottom,
   });
 
   /// Build [ThemeColors] from JSON. Tolerant of missing fields — falls back
@@ -170,6 +186,19 @@ class ThemeColors {
       primaryDark: _colorOr(j, 'primaryDark', d.primaryDark),
       background: _colorOr(j, 'background', d.background),
       gradientPurple: _colorOr(j, 'gradientPurple', d.gradientPurple),
+      // Fall back to this theme's own hues, not the global defaults — an
+      // Ocean or Sunset theme that predates these keys must keep its blue or
+      // orange auth background rather than inheriting the purple one.
+      authGradientTop: _colorOr(
+        j,
+        'authGradientTop',
+        _colorOr(j, 'gradientPurple', d.gradientPurple),
+      ),
+      authGradientBottom: _colorOr(
+        j,
+        'authGradientBottom',
+        _colorOr(j, 'primaryDark', d.primaryDark),
+      ),
       surface: _colorOr(j, 'surface', d.surface),
       success: _colorOr(j, 'success', d.success),
       orange: _colorOr(j, 'orange', d.orange),
@@ -215,6 +244,8 @@ class ThemeColors {
       skillRed: _colorOr(j, 'skillRed', d.skillRed),
       skillBlue: _colorOr(j, 'skillBlue', d.skillBlue),
       gradientGold: _colorOr(j, 'gradientGold', d.gradientGold),
+      navScrimTop: _colorOr(j, 'navScrimTop', d.navScrimTop),
+      navScrimBottom: _colorOr(j, 'navScrimBottom', d.navScrimBottom),
     );
   }
 
@@ -223,6 +254,8 @@ class ThemeColors {
         'primaryDark': _colorToHex(primaryDark),
         'background': _colorToHex(background),
         'gradientPurple': _colorToHex(gradientPurple),
+        'authGradientTop': _colorToHex(authGradientTop),
+        'authGradientBottom': _colorToHex(authGradientBottom),
         'surface': _colorToHex(surface),
         'success': _colorToHex(success),
         'orange': _colorToHex(orange),
@@ -268,6 +301,8 @@ class ThemeColors {
         'skillRed': _colorToHex(skillRed),
         'skillBlue': _colorToHex(skillBlue),
         'gradientGold': _colorToHex(gradientGold),
+        'navScrimTop': _colorToHex(navScrimTop),
+        'navScrimBottom': _colorToHex(navScrimBottom),
       };
 
   static const ThemeColors defaults = ThemeColors(
@@ -275,6 +310,8 @@ class ThemeColors {
     primaryDark: Color(0xFF3C315B),
     background: Color(0xFFF6F2FF),
     gradientPurple: Color(0xFF7F68C1),
+    authGradientTop: Color(0xFF806DB9),
+    authGradientBottom: Color(0xFF4B378B),
     surface: Color(0xFFFFFFFF),
     success: Color(0xFF2FBE87),
     orange: Color(0xFFFF7128),
@@ -320,6 +357,8 @@ class ThemeColors {
     skillRed: Color(0xFFFFE4E4),
     skillBlue: Color(0xFFE4E4FF),
     gradientGold: Color(0xFFFFD000),
+    navScrimTop: Color(0xFF857FA4),
+    navScrimBottom: Color(0xFF272145),
   );
 }
 
@@ -576,6 +615,23 @@ class ThemeManager {
   static Future<String?> getSelectedThemeName() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_selectedThemeKey);
+  }
+
+  /// Forget every persisted theme and return the live UI to the bundled
+  /// default. Called from the logout teardown (BR-P4JUDT).
+  ///
+  /// The palette lives outside Drift — in SharedPreferences (localStorage on
+  /// web) and in the static [_config] — so neither `clearAllData()` nor the
+  /// provider teardown resets it. Without this the next, possibly unknown, user
+  /// on a shared browser inherits the previous user's colours: immediately (the
+  /// static config survives) and again after a reload (`_restoreSavedTheme` in
+  /// main.dart re-reads [_selectedThemeKey]). Custom themes go too — they are
+  /// device-local and would otherwise stay listed for the next user.
+  static Future<void> resetToDefault() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_selectedThemeKey);
+    await prefs.remove(_customThemesKey);
+    apply(ThemeConfig.defaultTheme);
   }
 
   // ── API Sync ────────────────────────────────────────────────────

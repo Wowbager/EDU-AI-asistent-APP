@@ -22,6 +22,24 @@ class PracticeRepository {
     return _db.getActivePracticeCards(userId);
   }
 
+  /// Active cards the student may actually be offered: [getActiveCards] minus
+  /// everything belonging to a course flagged `only_once` — typically a test,
+  /// whose blocks must not resurface in practice or the quiz (BR-E495XK).
+  ///
+  /// Filtering the *source* rather than the built queue is deliberate: the
+  /// daily caps in [QueueBuilder] would otherwise be spent on cards that get
+  /// dropped afterwards, and the offer would come back short. Rows are only
+  /// filtered, never deleted — existing queues are left as they are, and a
+  /// course that loses the flag brings its cards straight back.
+  Future<List<PracticeCardsTableData>> getPracticeableCards(
+      String userId) async {
+    final cards = await getActiveCards(userId);
+    if (cards.isEmpty) return cards;
+    final excluded = await _db.getOnlyOnceCourseKeys();
+    if (excluded.isEmpty) return cards;
+    return cards.where((c) => !excluded.contains(c.courseId)).toList();
+  }
+
   /// Get due practice cards for a user (dueDate <= now).
   Future<List<PracticeCardsTableData>> getDueCards(String userId) {
     return _db.getDuePracticeCards(userId);
@@ -37,14 +55,37 @@ class PracticeRepository {
     return _db.getPracticeCardByBlock(userId, blockId);
   }
 
-  /// Insert or update a practice card.
+  /// Find the card to review for a block the practice player resolved.
+  ///
+  /// Card blockIds and player blockIds disagree around V2 steps: a bookmark
+  /// may store the base block ("X") while the player emits a step block
+  /// ("X:s1"), or the other way round. An exact lookup then misses and the
+  /// review used to be silently dropped. Falls back to the oldest-due card
+  /// among the base id and all "base:step" variants of [blockId].
+  Future<PracticeCardsTableData?> getCardForResolvedBlock(
+      String userId, String blockId) async {
+    final exact = await _db.getPracticeCardByBlock(userId, blockId);
+    if (exact != null) return exact;
+    final baseId =
+        blockId.contains(':') ? blockId.split(':').first : blockId;
+    final variants = await _db.getPracticeCardsForBaseBlock(userId, baseId);
+    return variants.isEmpty ? null : variants.first;
+  }
+
+  /// Apply a partial update to an existing card (keyed on the companion's id).
+  ///
+  /// Must stay a real UPDATE: the FSRS review path passes a companion carrying
+  /// only the rescheduling fields, and routing it through
+  /// `insertOnConflictUpdate` made drift validate it as an INSERT — the absent
+  /// required identity columns threw InvalidDataException before any SQL ran,
+  /// so every review was silently lost (the "practice never persists" bug).
   Future<void> updateCard(PracticeCardsTableCompanion card) {
-    return _db.upsertPracticeCard(card);
+    return _db.updatePracticeCardById(card);
   }
 
   /// Deactivate a practice card (sets isActive=false, syncStatus=1).
   Future<void> deactivateCard(String cardId) {
-    return _db.upsertPracticeCard(PracticeCardsTableCompanion(
+    return _db.updatePracticeCardById(PracticeCardsTableCompanion(
       id: Value(cardId),
       isActive: const Value(false),
       syncStatus: const Value(1),
@@ -54,7 +95,7 @@ class PracticeRepository {
 
   /// Reactivate a practice card (sets isActive=true, syncStatus=1).
   Future<void> reactivateCard(String cardId) {
-    return _db.upsertPracticeCard(PracticeCardsTableCompanion(
+    return _db.updatePracticeCardById(PracticeCardsTableCompanion(
       id: Value(cardId),
       isActive: const Value(true),
       syncStatus: const Value(1),
@@ -85,6 +126,11 @@ class PracticeRepository {
     required ContentBlock block,
     required String sourceType,
   }) async {
+    // Tests never feed the practice deck. Guarding here covers every entry
+    // point at once — lesson completion, sync seeding, and the auto-bookmark
+    // fired by a wrong answer inside the test itself (BR-E495XK).
+    if (await _db.isOnlyOnceCourse(courseId)) return null;
+
     final existing = await _db.getPracticeCardByBlock(userId, block.blockId);
 
     if (existing != null) {
@@ -121,6 +167,8 @@ class PracticeRepository {
       scheduledDays: const Value(0),
       elapsedDays: const Value(0),
       lastReview: Value(fsrs?.lastReview),
+      weight: Value(fsrs?.weight ?? 5.0),
+      skipCondition: Value(fsrs?.skipCondition),
       isActive: const Value(true),
       syncStatus: const Value(1),
       createdAt: Value(now),
@@ -168,6 +216,11 @@ class PracticeRepository {
     required String userId,
     required Course course,
   }) async {
+    // Read off the course itself, so a test is skipped whole — before the
+    // per-block lookups, and even when its row was written before the
+    // only_once column existed (BR-E495XK).
+    if (course.onlyOnce) return 0;
+
     int created = 0;
     for (final lesson in course.lessons) {
       created += await createCardsFromLesson(

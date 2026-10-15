@@ -58,11 +58,16 @@ class RemoteCourse {
       'quiz_evaluate': json['quiz_evaluate'],
       'only_quiz': json['only_quiz'],
       'starts_with_quiz': json['starts_with_quiz'],
+      'open_all_lessons': json['open_all_lessons'],
       // Carry denormalized listing metadata so the library card can show
       // duration/lesson count for not-yet-downloaded courses (the full
       // lessons+blocks data only arrives on download).
       'lesson_count': json['lesson_count'],
       'estimated_minutes': json['estimated_minutes'],
+      // The course cover set in admin. Served as its own listing field
+      // (the full JSON only arrives on download), so a library card can
+      // show it before the course is downloaded (BR-YKYXC6).
+      'header_image': json['header_image'],
       'lessons': List.generate(
         json['lesson_count'] as int? ?? 0,
         (i) => {'lesson_id': 'L${i + 1}'},

@@ -232,6 +232,11 @@ class RegisteredUser {
   final List<String>? selectedSubjects;
   final DateTime? emailVerifiedAt;
 
+  /// When the account finished the sign-up onboarding, null if it never has
+  /// (BR-YXVMKY). Backfilled to the creation date for every account that
+  /// predates the column, so a returning user is never asked again.
+  final DateTime? onboardedAt;
+
   const RegisteredUser({
     required this.id,
     required this.name,
@@ -239,7 +244,10 @@ class RegisteredUser {
     this.avatarIndex,
     this.selectedSubjects,
     this.emailVerifiedAt,
+    this.onboardedAt,
   });
+
+  bool get hasOnboarded => onboardedAt != null;
 
   factory RegisteredUser.fromJson(Map<String, dynamic> json) {
     return RegisteredUser(
@@ -252,6 +260,9 @@ class RegisteredUser {
           : null,
       emailVerifiedAt: json['email_verified_at'] != null
           ? DateTime.tryParse(json['email_verified_at'] as String)
+          : null,
+      onboardedAt: json['onboarded_at'] != null
+          ? DateTime.tryParse(json['onboarded_at'] as String)
           : null,
     );
   }

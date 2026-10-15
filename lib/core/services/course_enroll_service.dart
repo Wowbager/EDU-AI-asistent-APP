@@ -7,7 +7,18 @@ import '../../models/course_model.dart' as models;
 enum EnrollErrorKind {
   codeShort,
   notFound,
+
+  /// The session is gone (no active user). [enrollCourseByCode] has already
+  /// triggered the forced logout, so the app is on its way back to the login
+  /// screen — the caller must not show interactive UI on top of that.
   loginRequired,
+
+  /// The course is marked `logged_only` and the current user is a guest.
+  /// Nothing was torn down and the guest keeps their data, so the caller should
+  /// offer an upgrade path (see `showLoginRequiredForCourseDialog`) rather than
+  /// a dead-end message.
+  loginRequiredForCourse,
+
   alreadyCompleted,
   loadError,
   generic,
@@ -88,7 +99,10 @@ Future<EnrollOutcome> enrollCourseByCode(WidgetRef ref, String code) async {
       final activeUser = await db.getActiveUser();
       if (activeUser == null ||
           (activeUser.email.isEmpty && !activeUser.isEmailValidated)) {
-        return EnrollOutcome.failure(code, EnrollErrorKind.loginRequired);
+        return EnrollOutcome.failure(
+          code,
+          EnrollErrorKind.loginRequiredForCourse,
+        );
       }
     }
 
@@ -115,6 +129,12 @@ Future<EnrollOutcome> enrollCourseByCode(WidgetRef ref, String code) async {
         downloadedVersion: courseRow.version,
       );
     }
+
+    // Step 4.6: Kick off a sync now that the course content is local — it
+    // seeds practice cards for every default_practice block and pushes them
+    // to the server, so the student's practice set is complete immediately
+    // after enrollment instead of waiting for the next periodic sync.
+    ref.read(syncServiceProvider).sync();
 
     // Step 5: Load full course data for navigation
     final fullCourse = await courseRepo.getCourseById(course.id);

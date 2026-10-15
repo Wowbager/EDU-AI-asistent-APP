@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../core/media/course_image_urls.dart';
 import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
 import 'block_model.dart';
@@ -493,6 +494,19 @@ class Course {
   final bool isPrivate;      // When true, course is hidden from listings and accessible only via PIN
   final bool quizEvaluate;   // When true, quiz shows correct/incorrect feedback and score
   final bool onlyQuiz;       // When true, course runs only as a quiz — no lessons
+  /// When true, every lesson is unlocked from the start — the student picks
+  /// any order and no lesson gates the next one (BR-K47WYE). Position is still
+  /// kept per lesson; only the sequential gate is dropped.
+  final bool openAllLessons;
+  /// Course-wide default for randomizing answer order. A question's own
+  /// `shuffle_options` overrides it; questions that never set one inherit this,
+  /// so flipping the course flag reaches every legacy question too.
+  final bool shuffleAnswers;
+  /// Which attempt at an open question counts toward progress (BR-P745Q8).
+  ///
+  /// "last" (default) or "best". Failed evaluations count as neither — an AI
+  /// outage is not a result.
+  final String openAnswerScore;
   final int? maxXp;          // Maximum XP earnable from this course (hard cap)
   final List<Lesson> lessons;
   final List<Quiz> quizzes;
@@ -523,6 +537,9 @@ class Course {
     this.isPrivate = false,
     this.quizEvaluate = false,
     this.onlyQuiz = false,
+    this.openAllLessons = false,
+    this.shuffleAnswers = false,
+    this.openAnswerScore = 'last',
     this.maxXp,
     required this.lessons,
     required this.quizzes,
@@ -532,9 +549,80 @@ class Course {
 
   double get progress => lessonCount > 0 ? completedLessons / lessonCount : 0.0;
 
+  /// The server-side course code (`course_id` in the course JSON), e.g.
+  /// "A34-Funkce_c1_v3". [id] is whatever the caller built the course with —
+  /// usually the local Drift row id, which differs per device. Rows that come
+  /// from the server (bookmarks, practice cards) are keyed by this code, so
+  /// anything matching them needs both (BR-ZBJ99Z).
+  String? get courseCode {
+    final code = _rawData?['course_id'];
+    return code is String && code.isNotEmpty ? code : null;
+  }
+
+  /// Every picture the course content points at — what the offline lesson
+  /// image cache downloads ahead (BR-BX9AA4).
+  Set<String> get imageUrls => courseImageUrls(_rawData);
+
   /// Check if this course has block_v2 format data
   bool get hasBlockV2Data =>
       _rawData != null && BlockLoader.isBlockV2Format(_rawData);
+
+  /// This course with its lesson statuses re-derived from fresh progress, by
+  /// the same rules [Course.fromJsonData] applies — so the lesson page shows
+  /// what the course page will once it re-reads progress. Everything else,
+  /// the id the caller built the course with included, is kept.
+  ///
+  /// The lesson page is handed one course when it opens and passes it on to
+  /// the next lesson, so without this its "Tvůj postup" rail stayed at the
+  /// progress the course page had when the first lesson was opened
+  /// (BR-CPX4N9). A course without raw content has nothing to derive from
+  /// and comes back unchanged.
+  Course withLessonProgress({
+    required Map<String, dynamic> lessonsProgress,
+    required int completedLessons,
+    bool isCompleted = false,
+  }) {
+    final raw = _rawData;
+    if (raw == null) return this;
+    final fresh = Course.fromJsonData(
+      id: id,
+      data: raw,
+      completedLessons: completedLessons,
+      isCompleted: isCompleted,
+      lessonsProgress: lessonsProgress,
+    );
+    return Course(
+      id: id,
+      title: title,
+      subtitle: subtitle,
+      description: description,
+      coverImageUrl: coverImageUrl,
+      iconEmoji: iconEmoji,
+      iconBackgroundColor: iconBackgroundColor,
+      badge: badge,
+      difficulty: difficulty,
+      lessonCount: lessonCount,
+      durationHours: durationHours,
+      durationMinutes: durationMinutes,
+      completedLessons: completedLessons,
+      isCompleted: fresh.isCompleted,
+      isBookmarked: isBookmarked,
+      startsWithQuiz: startsWithQuiz,
+      exportType: exportType,
+      onlyOnce: onlyOnce,
+      isPrivate: isPrivate,
+      quizEvaluate: quizEvaluate,
+      onlyQuiz: onlyQuiz,
+      openAllLessons: openAllLessons,
+      shuffleAnswers: shuffleAnswers,
+      openAnswerScore: openAnswerScore,
+      maxXp: maxXp,
+      lessons: fresh.lessons,
+      quizzes: quizzes,
+      headerImage: headerImage,
+      rawData: raw,
+    );
+  }
 
   /// Load blocks for a specific lesson (by lesson ID)
   List<ContentBlock> getBlocksForLesson(String lessonId) {
@@ -559,7 +647,10 @@ class Course {
     if (_rawData == null) return [];
     final blocks = _rawData['blocks'] as List<dynamic>? ?? [];
     return blocks
-        .map((b) => ContentBlock.fromJson(b as Map<String, dynamic>))
+        .map((b) => ContentBlock.fromJson(
+              b as Map<String, dynamic>,
+              courseShuffleDefault: shuffleAnswers,
+            ))
         .toList();
   }
 
@@ -746,7 +837,10 @@ class Course {
         final stepPractice = _hasStepDefaultPractice(blockJson);
 
         if (!bindingPractice && !blockPractice && !stepPractice) continue;
-        result.add(ContentBlock.fromJson(blockJson));
+        result.add(ContentBlock.fromJson(
+          blockJson,
+          courseShuffleDefault: shuffleAnswers,
+        ));
       }
     }
 
@@ -757,7 +851,10 @@ class Course {
       final hasBlockFlag = entry.value['default_practice'] == true;
       final hasStepFlag = _hasStepDefaultPractice(entry.value);
       if (!hasBlockFlag && !hasStepFlag) continue;
-      result.add(ContentBlock.fromJson(entry.value));
+      result.add(ContentBlock.fromJson(
+        entry.value,
+        courseShuffleDefault: shuffleAnswers,
+      ));
     }
 
     // Filter: only completed blocks (makes Cvičení a review pool, not a spoiler)
@@ -840,7 +937,10 @@ class Course {
     for (final blockId in orderedBlockIds) {
       final blockJson = blockMap[blockId];
       if (blockJson == null) continue;
-      final block = ContentBlock.fromJson(blockJson);
+      final block = ContentBlock.fromJson(
+        blockJson,
+        courseShuffleDefault: shuffleAnswers,
+      );
       includedIds.add(blockId);
       if (block.type == BlockType.exercise &&
           (block.atomicQuestion != null || block.hasV2Steps)) {
@@ -851,7 +951,10 @@ class Course {
     // Also include unassigned exercise blocks (not in any lesson)
     for (final entry in blockMap.entries) {
       if (includedIds.contains(entry.key)) continue;
-      final block = ContentBlock.fromJson(entry.value);
+      final block = ContentBlock.fromJson(
+        entry.value,
+        courseShuffleDefault: shuffleAnswers,
+      );
       if (block.type == BlockType.exercise &&
           (block.atomicQuestion != null || block.hasV2Steps)) {
         questionBlocks.add(block);
@@ -859,6 +962,26 @@ class Course {
     }
 
     return questionBlocks;
+  }
+
+  /// Whether a course the student completed has since gained lessons they never
+  /// did (BR-PHJQDK).
+  ///
+  /// The stored completed status never downgrades, so it outlives the author
+  /// adding lessons — a student who finished a two-lesson version saw all four
+  /// lessons of the next one ticked off. A regular course only completes once
+  /// every lesson is done, so a completed count below the lesson count means
+  /// lessons arrived later. Courses finished by their quiz (only_quiz,
+  /// only_once) complete without the lessons and are left alone, as is a zero
+  /// count: that is the corrupted legacy data [Course.fromJsonData] marks
+  /// complete wholesale.
+  static bool gainedLessonsSinceCompletion(
+    Map<String, dynamic> data, {
+    required int completedLessons,
+  }) {
+    if (data['only_quiz'] == true || data['only_once'] == true) return false;
+    final lessonCount = (data['lessons'] as List<dynamic>?)?.length ?? 0;
+    return completedLessons > 0 && completedLessons < lessonCount;
   }
 
   /// Create a Course from downloaded JSON data and user progress.
@@ -888,6 +1011,14 @@ class Course {
     // Emoji options for lessons
     const lessonEmojis = ['📚', '📖', '✏️', '🎯', '💡', '🔬', '🧮', '📝', '🎓', '⭐'];
 
+    // Courses flagged open_all_lessons drop the sequential gate entirely.
+    final openAllLessons = data['open_all_lessons'] as bool? ?? false;
+
+    // A completed course stays completed, but lessons its author added since
+    // were never opened and must not inherit the course's checkmark.
+    final courseDone = isCompleted &&
+        !gainedLessonsSinceCompletion(data, completedLessons: completedLessons);
+
     for (int i = 0; i < lessonsJson.length; i++) {
       final lessonJson = lessonsJson[i] as Map<String, dynamic>;
       final lessonId = lessonJson['lesson_id'] as String? ?? 'lesson_$i';
@@ -896,11 +1027,21 @@ class Course {
       // progress data when available, fall back to sequential completedLessons
       // count, and ultimately to the course-level isCompleted flag.
       LessonStatus status;
-      if (isCompleted) {
+      if (courseDone) {
         // Course-level completion: all lessons are done regardless of
         // individual flags or completedLessons count (handles corrupted data
         // where completedLessons==0 but status=="completed").
         status = LessonStatus.completed;
+      } else if (openAllLessons) {
+        // Free order: only per-lesson is_completed counts. The sequential
+        // fallbacks below must NOT run here — completedLessons is a *count* of
+        // completed lessons, not an index, so a student who jumps straight to
+        // lesson 5 and finishes it (count == 1) would light up lesson 1 as
+        // completed. Everything not completed is inProgress, i.e. unlocked.
+        final lp = lessonsProgress?[lessonId] as Map<String, dynamic>?;
+        status = lp?['is_completed'] == true
+            ? LessonStatus.completed
+            : LessonStatus.inProgress;
       } else if (lessonsProgress != null) {
         final lp = lessonsProgress[lessonId] as Map<String, dynamic>?;
         final isLessonCompleted = lp?['is_completed'] == true;
@@ -1031,14 +1172,18 @@ class Course {
       durationHours: durationHours,
       durationMinutes: totalMinutes,
       completedLessons: completedLessons,
-      isCompleted: isCompleted,
+      isCompleted: courseDone,
       isBookmarked: isBookmarked,
       startsWithQuiz: data['starts_with_quiz'] as bool? ?? false,
       exportType: data['export_type'] as String?,
       onlyOnce: data['only_once'] as bool? ?? false,
       isPrivate: data['private'] as bool? ?? false,
       quizEvaluate: data['quiz_evaluate'] as bool? ?? false,
+      openAnswerScore:
+          data['open_answer_score'] == 'best' ? 'best' : 'last',
       onlyQuiz: data['only_quiz'] as bool? ?? false,
+      openAllLessons: openAllLessons,
+      shuffleAnswers: data['shuffle_answers'] as bool? ?? false,
       maxXp: data['max_xp'] as int?,
       lessons: lessons,
       quizzes: quizzes,

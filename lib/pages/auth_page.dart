@@ -1,15 +1,16 @@
 import 'dart:async';
 
 import 'package:drift/drift.dart' show Value;
-import 'package:flutter/foundation.dart'
-    show defaultTargetPlatform, kIsWeb, TargetPlatform;
+import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 
+import '../core/consent/minor_mode.dart';
 import '../core/database/app_database.dart' show UsersTableCompanion;
+import '../core/layout/breakpoints.dart';
 import '../core/theme/app_theme.dart';
 import '../core/providers/core_providers.dart';
+import '../core/providers/navigation_providers.dart';
 import '../data/repositories/course_repository.dart';
 import '../models/course_model.dart' as models;
 import 'course_detail_page.dart';
@@ -18,16 +19,33 @@ import '../core/strings/app_strings.dart';
 import 'package:eduai/core/util/silent_log.dart';
 import 'package:eduai/core/widgets/code_input_field.dart';
 import '../routing/deep_link.dart';
-import '../core/oauth/oauth_clients.dart';
-import '../core/oauth/google_web_button.dart';
+import '../widgets/auth_hero_scaffold.dart';
+import '../widgets/language_switcher.dart';
+import '../core/oauth/oauth_sign_in_buttons.dart';
 import '../data/repositories/oauth_repository.dart';
+import '../features/email_validation/providers/email_validation_providers.dart';
+import 'consent/age_gate_route.dart';
+import 'privacy_page.dart';
+import 'terms_page.dart';
+import '../core/util/shell_route.dart';
+
+/// Root of the phone / portrait-tablet (bottom-sheet) login layout. The
+/// wide-window layout keys (splitPaneKey, waveKey, …) live with the shared
+/// scaffold in `widgets/auth_hero_scaffold.dart`.
+const Key sheetKey = Key('auth-sheet');
 
 class AuthPage extends ConsumerStatefulWidget {
   /// Callback when user submits email - passes the entered email.
   final void Function(String email) onEmailSubmit;
 
   /// Callback when PIN login completes successfully (guest user created).
-  final void Function()? onPinLoginComplete;
+  ///
+  /// Carries the server's verdict on whether this login still owes the
+  /// sign-up onboarding (BR-YXVMKY). A course PIN always passes false — it
+  /// creates a guest, and a guest came to open a course, not to fill in a
+  /// profile. A student login code passes what `/api/resolve-code` said, so
+  /// the student is onboarded on their first entry and never again.
+  final void Function(bool profileSetupRequired)? onPinLoginComplete;
 
   /// Optional back button callback (shown when guest navigates here to log in).
   final VoidCallback? onBack;
@@ -38,6 +56,19 @@ class AuthPage extends ConsumerStatefulWidget {
   /// Callback when OAuth sign-in completes successfully.
   final ValueChanged<OAuthExchangeResult>? onOAuthSuccess;
 
+  /// Invoked when the age gate says the user is under the local threshold.
+  /// Passes the country the gate resolved, so the consent request carries
+  /// it. Null means the age gate never fires (callers that have not wired up
+  /// the guardian consent flow) — an OAuth sign-in then goes straight to the
+  /// credential exchange.
+  final ValueChanged<String?>? onNeedsParentalConsent;
+
+  /// Opened by a guest from inside their own session (MainScreen's "log in"),
+  /// so whoever types a student code here is that guest: their progress must
+  /// follow them into the account whatever the shared-device choice says
+  /// (BR-35W2HV). False for the logged-out login screen.
+  final bool guestUpgrade;
+
   const AuthPage({
     super.key,
     required this.onEmailSubmit,
@@ -45,6 +76,8 @@ class AuthPage extends ConsumerStatefulWidget {
     this.onBack,
     this.startInLoginMode = false,
     this.onOAuthSuccess,
+    this.onNeedsParentalConsent,
+    this.guestUpgrade = false,
   });
 
   @override
@@ -54,17 +87,20 @@ class AuthPage extends ConsumerStatefulWidget {
 class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderStateMixin {
   late bool _isSignUpMode = widget.startInLoginMode;
   bool _isLookingUpPin = false;
-  bool _isOAuthInProgress = false;
   String? _pinError;
 
-  /// Web-only: the GIS button drives Google sign-in and results arrive on this
-  /// subscription. [_googleWebReady] gates rendering the button until the SDK
-  /// is initialized. Both stay null/false on native.
-  StreamSubscription<OAuthClientResult>? _googleWebSub;
-  bool _googleWebReady = false;
+  /// The e-mail form is asking the server whether the address has an account.
+  bool _isCheckingEmail = false;
 
   /// Guards the one-shot deep-link auto-submit so it fires at most once.
   bool _deepLinkConsumed = false;
+
+  /// Recognizers for the terms/privacy spans in the sign-up RichText.
+  /// TextSpan recognizers are not widgets — they must be disposed manually.
+  late final TapGestureRecognizer _termsRecognizer = TapGestureRecognizer()
+    ..onTap = _openTerms;
+  late final TapGestureRecognizer _privacyRecognizer = TapGestureRecognizer()
+    ..onTap = _openPrivacy;
 
   /// Inverted UI state: true when user opts OUT of shared-device mode
   /// (i.e. wants to stay permanently logged in). Default false = shared.
@@ -116,17 +152,6 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
     // and resolve it through the normal guest PIN flow so the course opens
     // without the user re-typing the code they already clicked.
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeConsumeDeepLink());
-
-    // Web: Google sign-in can't be triggered imperatively — a GIS button
-    // renders it and results arrive on the event stream. Subscribe once and
-    // initialize the SDK so the button can render.
-    if (kIsWeb) {
-      final client = ref.read(googleOAuthClientProvider);
-      _googleWebSub = client.signInResults().listen(_completeOAuth);
-      client.ensureInitialized().then((_) {
-        if (mounted) setState(() => _googleWebReady = true);
-      });
-    }
   }
 
   /// If a deep-link code is pending and we're on the PIN screen, prefill it and
@@ -147,9 +172,22 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
     _handlePinSubmit();
   }
 
+  void _openTerms() {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const TermsPage()),
+    );
+  }
+
+  void _openPrivacy() {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const PrivacyPage()),
+    );
+  }
+
   @override
   void dispose() {
-    _googleWebSub?.cancel();
+    _termsRecognizer.dispose();
+    _privacyRecognizer.dispose();
     _animationController.dispose();
     _emailController.dispose();
     _codeController.dispose();
@@ -202,9 +240,34 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
       // One call resolves both course PINs and student login codes.
       if (course == null) {
         final guestAuthService = ref.read(guestAuthServiceProvider);
+
+        // Flush pending local progress while the guest token is still active:
+        // /resolve-code folds the guest's server-side data into the student
+        // account (absorbGuest, BR-4FTCFH), and anything not pushed by now
+        // can't take part in that merge — it would be wiped by the
+        // clearAllData below. Best-effort and time-boxed, like logout.
         try {
+          final api = ref.read(apiClientProvider);
+          if (api.isAuthenticated) {
+            final sync = ref.read(syncServiceProvider);
+            if (await sync.hasPendingChanges()) {
+              await sync.forceSync().timeout(const Duration(seconds: 8));
+            }
+          }
+        } catch (e, st) {
+          silentLog('auth_page', e, st);
+        }
+
+        try {
+          // "Shared device" is the default, and on its own it makes the
+          // server skip the merge — so a guest-upgrade login has to ask for
+          // it explicitly, or the wipe below loses everything (BR-35W2HV).
           final resolved = await guestAuthService
-              .resolveCode(_pin, sharedDevice: shared)
+              .resolveCode(
+                _pin,
+                sharedDevice: shared,
+                mergeGuest: widget.guestUpgrade,
+              )
               .timeout(const Duration(seconds: 15));
 
           if (resolved != null && resolved.isUser) {
@@ -246,8 +309,19 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
                   ));
             }
             ref.invalidate(isAuthenticatedProvider);
+            // A different student is now signed in on this device, and the
+            // cached identity is what the avatar hangs off (BR-SPR9WH).
+            ref.invalidate(activeUserProvider);
+            // The resolve-code response carries `minor`; /api/user on the next
+            // boot is the ongoing authority, but this makes the current
+            // session correct immediately (name lock, hidden sign-up prompt)
+            // without waiting for a restart.
+            await ref.read(minorModeProvider.notifier).set(resolved.minor);
+            // Pull the account's data (incl. any guest progress the server
+            // just merged in) into the freshly wiped local DB.
+            unawaited(ref.read(syncServiceProvider).forceSync());
             setState(() => _isLookingUpPin = false);
-            widget.onPinLoginComplete?.call();
+            widget.onPinLoginComplete?.call(resolved.profileSetupRequired);
             return;
           }
 
@@ -372,7 +446,7 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
         });
         _clearPin();
         // Still complete login so the user lands in the app
-        widget.onPinLoginComplete?.call();
+        widget.onPinLoginComplete?.call(false);
         return;
       }
 
@@ -435,8 +509,15 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
           isCompleted: userCourse?.status == 'completed',
         );
 
+        // MainScreen is not mounted yet, so the tab provider still holds its
+        // default (Přehled) — the sidebar this pushed page draws would
+        // highlight the wrong destination, and returning would land on the
+        // dashboard rather than the course's own tab (BR-48B7DY).
+        ref.read(mainTabIndexProvider.notifier).state = kKurzyTabIndex;
+
         await Navigator.of(context).push(
-          MaterialPageRoute(
+          shellPageRoute(
+      context,
             builder: (_) => CourseDetailPage(
               course: courseModel,
               userCourseId: userCourse?.id,
@@ -446,7 +527,7 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
 
         // Step 8: After returning from course, switch to main app
         if (mounted) {
-          widget.onPinLoginComplete?.call();
+          widget.onPinLoginComplete?.call(false);
         }
       }
     } catch (e) {
@@ -459,6 +540,7 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
   }
 
   void _handleLogin() async {
+    if (_isCheckingEmail) return;
     final email = _emailController.text.trim();
     // Persist user's session-mode choice for downstream verify/registerVerified.
     await ref.read(sessionMetaProvider).setPendingSharedDevice(!_keepLoggedIn);
@@ -483,73 +565,53 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
       return;
     }
 
-    // Just proceed to verification page - it will handle sending the code
+    setState(() => _isCheckingEmail = true);
+
+    // Nothing is sent yet: an e-mail with an account behind it goes on to its
+    // sign-in code, an unknown one is a registration and meets the age gate
+    // first (BR-J2WJEQ). The verification page sends the code.
+    final proceed = await ref
+        .read(emailVerificationProvider.notifier)
+        .screenNewAccount(
+          email,
+          onNewAccount: widget.onNeedsParentalConsent == null
+              ? null
+              : _ageGateBeforeRegistration,
+        );
+    if (!mounted) return;
+    setState(() => _isCheckingEmail = false);
+    if (!proceed) return;
+
     widget.onEmailSubmit(email);
   }
 
-  /// Native (iOS/Android) button handler: obtain the provider credential
-  /// imperatively, then exchange it. Web Google sign-in does not use this —
-  /// its GIS button feeds [_completeOAuth] via the event subscription.
-  Future<void> _handleOAuthLogin(String provider) async {
-    setState(() => _isOAuthInProgress = true);
+  /// The age gate, run once an e-mail or a provider credential turns out to
+  /// belong to no account yet. Returns whether the registration may proceed.
+  ///
+  /// It used to sit in front of this whole form, which meant a returning user
+  /// was asked where they live and how old they are every time they signed in
+  /// (BR-N9Y48J). The form is login and registration at once, so the gate
+  /// belongs on the branch that actually creates an account: for e-mail the
+  /// account check in [_handleLogin], before any code is sent (BR-J2WJEQ), and
+  /// for OAuth the sign-in-only exchange in [OAuthSignInButtons] that reports
+  /// "this would register" without registering — moving it off *every* social
+  /// sign-in (BR-VTNTMQ).
+  Future<bool> _ageGateBeforeRegistration() async {
+    // Null means this caller has no consent flow wired up — nothing to hand a
+    // minor off to, so the gate would be a dead end.
+    if (widget.onNeedsParentalConsent == null) return true;
 
-    final OAuthClientResult? clientResult;
-    try {
-      clientResult = await switch (provider) {
-        'apple' => ref.read(appleOAuthClientProvider).signIn(),
-        'google' => ref.read(googleOAuthClientProvider).signIn(),
-        'microsoft' => ref.read(microsoftOAuthClientProvider).signIn(),
-        _ => Future<OAuthClientResult?>.value(null),
-      };
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(AppStrings.genericError('$e')),
-          backgroundColor: AppColors.error,
-        ));
-        setState(() => _isOAuthInProgress = false);
-      }
-      return;
-    }
+    final result = await showAgeGate(context);
+    if (!mounted) return false;
 
-    if (clientResult == null) {
-      if (mounted) setState(() => _isOAuthInProgress = false);
-      return; // user cancelled
-    }
-
-    await _completeOAuth(clientResult);
-  }
-
-  /// Exchange a provider credential for a session and notify the parent.
-  /// Shared by the native handler and the web Google event subscription.
-  Future<void> _completeOAuth(OAuthClientResult clientResult) async {
-    final messenger = ScaffoldMessenger.of(context);
-    setState(() => _isOAuthInProgress = true);
-
-    try {
-      await ref.read(sessionMetaProvider).setPendingSharedDevice(!_keepLoggedIn);
-      final exchange = await ref.read(oauthRepositoryProvider).exchange(
-            clientResult,
-            sharedDevice: !_keepLoggedIn,
-          );
-
-      widget.onOAuthSuccess?.call(exchange);
-    } on OAuthExchangeException catch (e) {
-      if (mounted) {
-        messenger.showSnackBar(SnackBar(
-          content: Text(AppStrings.genericError(e.message)),
-          backgroundColor: AppColors.error,
-        ));
-      }
-    } catch (e) {
-      if (mounted) {
-        messenger.showSnackBar(SnackBar(
-          content: Text(AppStrings.genericError('$e')),
-          backgroundColor: AppColors.error,
-        ));
-      }
-    } finally {
-      if (mounted) setState(() => _isOAuthInProgress = false);
+    switch (result.outcome) {
+      case AgeGateOutcome.oldEnough:
+        return true;
+      case AgeGateOutcome.needsConsent:
+        widget.onNeedsParentalConsent?.call(result.country);
+        return false;
+      case AgeGateOutcome.dismissed:
+        return false;
     }
   }
 
@@ -564,9 +626,36 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
     }
   }
 
+  /// At its natural ratio the wave is only ~68px tall on a 390px phone, where
+  /// the design has it nearer 100. Rendering it 1.5× the viewport width
+  /// restores that height and crops the ends, which are flat anyway.
+  static const double _waveCompactZoom = 1.5;
+
+  /// How far the props sink into the wave, as a share of the wave's height.
+  /// They have to overlap it or they read as floating above the ground; too
+  /// much and the lower props disappear behind the sheet.
+  static const double _heroWaveOverlap = 0.4;
+
+  /// Breathing room between the top safe-area inset and the composition.
+  static const double _heroTopGap = 8;
+
   @override
   Widget build(BuildContext context) {
-    final screenHeight = MediaQuery.of(context).size.height;
+    // Landscape tablet / desktop: the shared hero-scene scaffold draws the
+    // illustration and the right-hand panel; the sheet layout's height
+    // animation does not apply there — the panel is a fixed pane, so
+    // switching modes only cross-fades its contents.
+    if (context.isExpanded) {
+      return AuthHeroScaffold(
+        // Same switcher the sheet layout puts in the corner (BR-U75N5Y), over
+        // the hero rather than the panel so it stays on the dark background.
+        heroOverlay: const LanguageSwitcher(onDark: true),
+        panel: AnimatedBuilder(
+          animation: _animationController,
+          builder: (context, _) => _buildFormColumn(),
+        ),
+      );
+    }
 
     return Scaffold(
       body: Container(
@@ -575,7 +664,16 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
         decoration: BoxDecoration(
           gradient: AppColors.authGradient,
         ),
-        child: AnimatedBuilder(
+        child: _buildSheetLayout(context),
+      ),
+    );
+  }
+
+  /// Phone / portrait tablet: illustration on top, white sheet over the bottom.
+  Widget _buildSheetLayout(BuildContext context) {
+    final screenHeight = MediaQuery.sizeOf(context).height;
+
+    return AnimatedBuilder(
           animation: _animationController,
           builder: (context, child) {
             // Cap the card height so its top never rises above the top safe-area
@@ -592,33 +690,41 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
                 : (screenHeight * _heightAnimation.value)
                     .clamp(0.0, maxContainerHeight)
                     .toDouble();
-            final logoBottom = containerHeight + 60;
             final bgBottom = containerHeight - 20;
 
+            // The composition stands on the wave, so it is anchored to the
+            // wave's top edge rather than to the sheet, and it gets whatever
+            // is left between there and the status bar. Both move as the
+            // sheet grows into sign-up mode or the keyboard opens, so this is
+            // recomputed every frame instead of being a constant offset.
+            final waveHeight =
+                mq.size.width * _waveCompactZoom * kAuthWaveAspectRatio;
+            final heroBottom = bgBottom + waveHeight * (1 - _heroWaveOverlap);
+            final heroBand =
+                mq.size.height - mq.padding.top - _heroTopGap - heroBottom;
+
             return Stack(
+              key: sheetKey,
               children: [
-                // Background decorative image
+                // Ground wave, tucked just behind the top edge of the card.
+                // The asset is 1440 wide; on a phone it is rendered wider than
+                // the viewport so the curve keeps the height it has in the
+                // design instead of flattening to a thin strip.
                 Positioned(
                   bottom: bgBottom,
-                  left: 0,
-                  right: 0,
-                  child: Image.asset(
-                    'assets/images/login_bg.png',
-                    fit: BoxFit.cover,
-                    width: double.infinity,
+                  left: -(mq.size.width * (_waveCompactZoom - 1)) / 2,
+                  child: buildAuthWave(
+                    width: mq.size.width * _waveCompactZoom,
                   ),
                 ),
-                // Logo
+                // Wordmark + the mascot standing on the wave. Drawn after the
+                // wave so the props sit in front of it, same order the
+                // split-pane hero uses.
                 Positioned(
-                  bottom: logoBottom,
+                  bottom: heroBottom,
                   left: 0,
                   right: 0,
-                  child: Center(
-                    child: Image.asset(
-                      'assets/images/login_logo.png',
-                      width: 276,
-                    ),
-                  ),
+                  child: AuthCompactHero(maxHeight: heroBand),
                 ),
                 // White form container
                 Positioned(
@@ -629,69 +735,89 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
                   child: Container(
                     decoration: BoxDecoration(
                       color: AppColors.surface,
-                      borderRadius: BorderRadius.only(
-                        topLeft: Radius.circular(32),
-                        topRight: Radius.circular(32),
+                      borderRadius: const BorderRadius.only(
+                        topLeft: Radius.circular(26),
+                        topRight: Radius.circular(26),
                       ),
                     ),
                     child: SafeArea(
                       top: false,
                       child: SingleChildScrollView(
-                        padding: const EdgeInsets.fromLTRB(24, 32, 24, 24),
+                        padding: const EdgeInsets.fromLTRB(32, 32, 32, 24),
                         child: Center(
                           child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 400),
-                            child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            // Header with back button
-                            if (_isSignUpMode || widget.onBack != null)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 16),
-                                child: GestureDetector(
-                                  onTap: _isSignUpMode
-                                      ? (widget.onBack ?? _toggleMode)
-                                      : widget.onBack,
-                                  child: Container(
-                                    width: 40,
-                                    height: 40,
-                                    decoration: BoxDecoration(
-                                      color: AppColors.primaryDark08,
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: Icon(
-                                      Icons.arrow_back,
-                                      color: AppColors.primaryDark,
-                                      size: 20,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            // Headline
-                            Text(
-                              AppStrings.authHeadline,
-                              style: AppTextStyles.heading1().copyWith(
-                                height: 1.2,
-                              ),
+                            constraints: const BoxConstraints(
+                              maxWidth: kAuthFormColumnWidth,
                             ),
-                            const SizedBox(height: 24),
-                            // Content based on mode
-                            _isSignUpMode
-                                ? _buildSignUpContent()
-                                : _buildWelcomeContent(),
-                          ],
-                            ),
+                            child: _buildFormColumn(),
                           ),
                         ),
                       ),
                     ),
                   ),
                 ),
+                // Language switcher — the only place to pick a language before
+                // login (the profile picker needs an account). Sits on the
+                // gradient above the card, which tops out at 72% of the screen.
+                // Hidden while the keyboard is up: the card is then clamped to
+                // the full remaining height and would slide under the pill.
+                if (mq.viewInsets.bottom == 0)
+                  const Positioned(
+                    top: 0,
+                    right: 0,
+                    child: SafeArea(
+                      child: Padding(
+                        padding: EdgeInsets.only(top: 8, right: 16),
+                        child: LanguageSwitcher(onDark: true),
+                      ),
+                    ),
+                  ),
               ],
             );
           },
+        );
+  }
+
+  /// The form itself — back button, headline and the mode-specific body.
+  /// Shared by both layouts so the two never drift apart.
+  Widget _buildFormColumn() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Header with back button
+        if (_isSignUpMode || widget.onBack != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: GestureDetector(
+              onTap: _isSignUpMode
+                  ? (widget.onBack ?? _toggleMode)
+                  : widget.onBack,
+              child: Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: AppColors.primaryDark08,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.arrow_back,
+                  color: AppColors.primaryDark,
+                  size: 20,
+                ),
+              ),
+            ),
+          ),
+        // Headline
+        Text(
+          AppStrings.authFormHeadline,
+          style: AppTextStyles.heading1().copyWith(
+            height: 1.2,
+          ),
         ),
-      ),
+        const SizedBox(height: 24),
+        // Content based on mode
+        _isSignUpMode ? _buildSignUpContent() : _buildWelcomeContent(),
+      ],
     );
   }
 
@@ -836,7 +962,7 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 GestureDetector(
-                  onTap: () {},
+                  onTap: _openTerms,
                   child: Text(
                     AppStrings.authTerms,
                     style: AppTextStyles.caption(color: AppColors.primaryDark48).copyWith(
@@ -846,7 +972,7 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
                 ),
                 const SizedBox(width: 16),
                 GestureDetector(
-                  onTap: () {},
+                  onTap: _openPrivacy,
                   child: Text(
                     AppStrings.authPrivacy,
                     style: AppTextStyles.caption(color: AppColors.primaryDark48).copyWith(
@@ -901,26 +1027,37 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
             width: double.infinity,
             height: 56,
             child: ElevatedButton(
-              onPressed: _handleLogin,
+              onPressed: _isCheckingEmail ? null : _handleLogin,
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.primaryDark,
                 foregroundColor: Colors.white,
+                disabledBackgroundColor: AppColors.primaryDark48,
+                disabledForegroundColor: Colors.white.withAlpha(179),
                 shape: RoundedRectangleBorder(
                   borderRadius: AppDecorations.radiusM,
                 ),
                 elevation: 0,
               ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    AppStrings.authLogin,
-                    style: AppTextStyles.buttonLarge(color: Colors.white),
-                  ),
-                  const SizedBox(width: 8),
-                  const Icon(Icons.arrow_forward, size: 20),
-                ],
-              ),
+              child: _isCheckingEmail
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      ),
+                    )
+                  : Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          AppStrings.authLogin,
+                          style: AppTextStyles.buttonLarge(color: Colors.white),
+                        ),
+                        const SizedBox(width: 8),
+                        const Icon(Icons.arrow_forward, size: 20),
+                      ],
+                    ),
             ),
           ),
           const SizedBox(height: 24),
@@ -949,57 +1086,13 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
             ],
           ),
           const SizedBox(height: 24),
-          // Google OAuth button. Web must use the GIS-rendered button (no
-          // imperative authenticate() on web); native uses the custom button.
-          if (kIsWeb)
-            SizedBox(
-              height: 48,
-              child: Center(
-                child: _googleWebReady
-                    ? googleRenderedSignInButton()
-                    : const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-              ), // GIS button once SDK ready; spinner while initializing
-            )
-          else
-            _buildOAuthButton(
-              onTap: _isOAuthInProgress ? null : () => _handleOAuthLogin('google'),
-              icon: SvgPicture.asset(
-                'assets/icons/google.svg',
-                width: 24,
-                height: 24,
-              ),
-              label: AppStrings.authGoogleLogin,
-            ),
-          const SizedBox(height: 12),
-          // Microsoft OAuth button — constrained to the GIS button's width on
-          // web so all three social buttons align.
-          _constrainSocialWeb(_buildOAuthButton(
-            onTap: _isOAuthInProgress ? null : () => _handleOAuthLogin('microsoft'),
-            icon: SvgPicture.asset(
-              'assets/icons/microsoft.svg',
-              width: 24,
-              height: 24,
-            ),
-            label: AppStrings.authMicrosoftLogin,
-          )),
-          // Apple OAuth button — only on Apple devices. Web/Android would need
-          // the Apple Services ID web flow, which isn't set up, so hide it there.
-          if (_showAppleSignIn) ...[
-            const SizedBox(height: 12),
-            _constrainSocialWeb(_buildOAuthButton(
-              onTap: _isOAuthInProgress ? null : () => _handleOAuthLogin('apple'),
-              icon: SvgPicture.asset(
-                'assets/icons/apple.svg',
-                width: 24,
-                height: 24,
-              ),
-              label: AppStrings.authAppleLogin,
-            )),
-          ],
+          OAuthSignInButtons(
+            // The checkbox is the user's stated session choice here, so it is
+            // both what we ask the backend for and what we remember.
+            sharedDevice: !_keepLoggedIn,
+            beforeExchange: _ageGateBeforeRegistration,
+            onSuccess: (exchange) => widget.onOAuthSuccess?.call(exchange),
+          ),
           const SizedBox(height: 24),
           // Terms and Privacy Policy
           Center(
@@ -1010,7 +1103,16 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
                 children: [
                   TextSpan(text: AppStrings.authTermsNotice),
                   TextSpan(
-                    text: AppStrings.authTermsAndPrivacy,
+                    text: AppStrings.authTermsLink,
+                    recognizer: _termsRecognizer,
+                    style: AppTextStyles.caption(color: AppColors.primaryDark64).copyWith(
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                  TextSpan(text: AppStrings.authTermsPrivacyJoiner),
+                  TextSpan(
+                    text: AppStrings.authPrivacyLink,
+                    recognizer: _privacyRecognizer,
                     style: AppTextStyles.caption(color: AppColors.primaryDark64).copyWith(
                       decoration: TextDecoration.underline,
                     ),
@@ -1059,86 +1161,6 @@ class _AuthPageState extends ConsumerState<AuthPage> with SingleTickerProviderSt
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  /// Apple Sign In is only offered on Apple platforms. On web and Android it
-  /// would require the Apple Services ID web OAuth flow (not configured), so
-  /// the button is hidden there.
-  bool get _showAppleSignIn =>
-      !kIsWeb &&
-      (defaultTargetPlatform == TargetPlatform.iOS ||
-          defaultTargetPlatform == TargetPlatform.macOS);
-
-  /// On web the Google button is GIS-rendered and capped near 400px wide;
-  /// constrain the other social buttons to match so the column aligns. No-op
-  /// on native, where all social buttons are full-width custom buttons.
-  Widget _constrainSocialWeb(Widget child) {
-    if (!kIsWeb) return child;
-    return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 400),
-        child: child,
-      ),
-    );
-  }
-
-  Widget _buildOAuthButton({
-    required VoidCallback? onTap,
-    required Widget icon,
-    required String label,
-  }) {
-    // On web the Google button is Google-rendered (fixed ~40px tall, ~4px
-    // corners, logo pinned left, text centered, regular weight). Match the
-    // custom social buttons to it so the set looks uniform.
-    final bool matchGis = kIsWeb;
-
-    final Widget content = matchGis
-        // GIS layout: icon pinned left, label centered across the full width.
-        ? Stack(
-            alignment: Alignment.center,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(left: 12),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: icon,
-                ),
-              ),
-              Text(
-                label,
-                textAlign: TextAlign.center,
-                style: AppTextStyles.bodyLarge().copyWith(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          )
-        : Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              icon,
-              const SizedBox(width: 12),
-              Text(label, style: AppTextStyles.bodyLarge()),
-            ],
-          );
-
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        height: matchGis ? 40 : 56,
-        decoration: BoxDecoration(
-          border: Border.all(
-            color: AppColors.primaryDark16,
-            width: 1,
-          ),
-          borderRadius:
-              matchGis ? BorderRadius.circular(4) : AppDecorations.radiusM,
-        ),
-        child: content,
       ),
     );
   }

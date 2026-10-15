@@ -191,6 +191,39 @@ void main() {
     expect(result.profileSetupRequired, false);
   });
 
+  // ── allow_registration ─────────────────────────────────────────────────────
+
+  test('allow_registration defaults to true in the body', () async {
+    await repo.exchange(
+      OAuthClientResult(provider: OAuthProvider.google, idToken: 'g'),
+    );
+
+    expect(fakeApi.capturedBody!['allow_registration'], true);
+  });
+
+  test('allow_registration=false is sent in body', () async {
+    await repo.exchange(
+      OAuthClientResult(provider: OAuthProvider.google, idToken: 'g'),
+      allowRegistration: false,
+    );
+
+    expect(fakeApi.capturedBody!['allow_registration'], false);
+  });
+
+  test('409 becomes OAuthRegistrationRequiredException, not a plain failure',
+      () async {
+    fakeApi.nextResult =
+        ApiResult.failure('Tento účet zatím neexistuje.', statusCode: 409);
+
+    expect(
+      () => repo.exchange(
+        OAuthClientResult(provider: OAuthProvider.google, idToken: 'g'),
+        allowRegistration: false,
+      ),
+      throwsA(isA<OAuthRegistrationRequiredException>()),
+    );
+  });
+
   // ── Error path ─────────────────────────────────────────────────────────────
 
   test('Throws OAuthExchangeException on API failure', () async {

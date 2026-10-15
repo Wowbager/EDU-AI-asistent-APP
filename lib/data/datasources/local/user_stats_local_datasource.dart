@@ -70,6 +70,8 @@ class UserStatsLocalDataSource {
     required int coursesCount,
     required int streakDays,
     required int achievementsCount,
+    required int coinsEarned,
+    required int coinsBalance,
     DateTime? lastStreakDate,
     required DateTime serverUpdatedAt,
     String? existingLocalId,
@@ -86,6 +88,8 @@ class UserStatsLocalDataSource {
         coursesCount: Value(coursesCount),
         streakDays: Value(streakDays),
         achievementsCount: Value(achievementsCount),
+        coinsEarned: Value(coinsEarned),
+        coinsBalance: Value(coinsBalance),
         lastStreakDate: Value(lastStreakDate),
         syncStatus: Value(SyncStatus.synced.toInt()),
         updatedAt: Value(serverUpdatedAt),
@@ -121,6 +125,19 @@ class UserStatsLocalDataSource {
       level: level,
       dailyXpDate: dailyXpDate,
       dailyXpAmount: dailyXpAmount,
+    );
+  }
+
+  /// Update the EDUX coin wallet (BR-HK9828).
+  Future<void> updateCoins({
+    required String localId,
+    required int coinsEarned,
+    required int coinsBalance,
+  }) async {
+    await _db.updateUserStats(
+      id: localId,
+      coinsEarned: coinsEarned,
+      coinsBalance: coinsBalance,
     );
   }
 

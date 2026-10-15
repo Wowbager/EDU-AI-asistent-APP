@@ -39,6 +39,19 @@ class ApiEndpoints {
   /// Returns: { type: "course"|"user", course?: {...}, token?: "...", user?: {...} }
   static const String resolveCode = '/api/resolve-code';
 
+  /// GET - Classes the authenticated user is a member of (BR-3V2P22).
+  /// Returns: { data: [{ id, name }] }
+  static const String userClassrooms = '/api/user/classrooms';
+
+  /// POST - Dry run of joining a class by student code.
+  /// Body: { code }  Returns: { data: { classroom: {id,name}, student_name } }
+  static const String userClassroomsLookup = '/api/user/classrooms/lookup';
+
+  /// POST - Join a class by student code (merges the teacher's placeholder
+  /// account into this one). Body: { code }
+  /// Returns: { data: { classroom: {id,name}, classrooms: [{id,name}] } }
+  static const String userClassroomsJoin = '/api/user/classrooms/join';
+
   /// POST - Invalidate token (requires auth).
   static const String logout = '/api/logout';
 
@@ -124,6 +137,33 @@ class ApiEndpoints {
   /// GET  - Get quiz attempts (supports ?course_id= filter).
   static const String quizAttempts = '/api/user/quiz-attempts';
 
+  /// POST - Formative AI feedback on one open answer. Stateless: the request
+  /// carries the whole task, nothing is persisted (BR-FFVVYR, BR-P745Q8).
+  /// Body: { question, help?, solution?, correct_answer?, criteria?,
+  ///         criteria_list?, student_answer?, photo_name?, language? }
+  ///        — student_answer or photo_name must be present.
+  /// Returns: { data: { score, is_correct, feedback, feedback_parts,
+  ///                    criteria_scores, flags, model, prompt_version } }
+  /// `score` and `is_correct` are internal — never render them to a student.
+  static const String answersEvaluate = '/api/answers/evaluate';
+
+  /// POST - Upload a photographed answer, returns the handle to send with the
+  /// evaluation. Multipart: { photo, course_id? } (BR-P745Q8).
+  static const String answerPhoto = '/api/answers/photo';
+
+  /// GET - The student's own photographed answer, by handle. Used on resume.
+  static String answerPhotoByName(String name) => '/api/answers/photo/$name';
+
+  /// POST - Persist evaluated open answers given outside quiz mode.
+  /// GET  - Get the user's own open answers (?course_id=, ?block_id=).
+  static const String openAnswers = '/api/user/open-answers';
+
+  /// POST - AI comment for the end-of-quiz feedback popup.
+  /// Body: { tasks: [{ assignment, outcome, hint_used, help_used,
+  ///         duration_ms? }], domain_deltas?, language? }
+  /// Returns: { data: { comment } }
+  static const String quizFeedback = '/api/quiz/feedback';
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Practice Cards (FSRS spaced repetition)
   // ═══════════════════════════════════════════════════════════════════════════
@@ -180,6 +220,10 @@ class ApiEndpoints {
 
   /// POST - Batch log ELO interactions (offline sync).
   static const String eloInteractionsBatch = '/api/elo/interactions/batch';
+
+  /// GET - Previous valid reaction times (seconds) per task, for the Pilot 2
+  /// robust gaming threshold (BR-H3TCRE). Query: ?block_ids=id1,id2
+  static const String eloGamingReference = '/api/elo/gaming-reference';
 
   /// GET - Canonical GPF vector dimension labels (Czech), 35 rows.
   static const String gpfDimensions = '/api/gpf/dimensions';
@@ -240,6 +284,10 @@ class ApiEndpoints {
   // Chat
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /// GET - Mentors offered in the new-chat list. With ?course_id= it returns
+  /// that course's mentors instead, including the ones hidden from the list.
+  static const String chatMentors = '/api/chat/mentors';
+
   /// GET - List user's chat sessions (supports ?since= for incremental pull).
   /// POST - Create a new chat session.
   static const String chatSessions = '/api/chat/sessions';
@@ -272,4 +320,61 @@ class ApiEndpoints {
 
   /// POST - Mark a news item as read (returns updated unread_count).
   static String newsRead(int id) => '/api/news/$id/read';
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Parental consent (minors) — BR-8FDF37
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// GET - Age thresholds per country + current consent text version.
+  static const String consentConfig = '/api/consent/config';
+
+  /// POST - Ask a guardian for consent. Body: { email, locale, country }
+  static const String consentRequest = '/api/consent/request';
+
+  /// POST - Confirm a consent from the emailed link. Body: { id, code }
+  /// Called only from the public web page, never from the child's session.
+  /// Returns: { confirmed, children (total minor count, an int), mail_sent }
+  static const String consentConfirm = '/api/consent/confirm';
+
+  /// GET - Guardian management page state. Append the magic-link token
+  /// (`$consentManage/$token`). Response carries Cache-Control: no-store
+  /// and Referrer-Policy: no-referrer — never cache it client-side.
+  static const String consentManage = '/api/consent/manage';
+
+  /// POST - Email a fresh magic link. Body: { email }
+  static const String consentManageRequestLink = '/api/consent/manage/request-link';
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Mini games (Minihry)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// GET - List active mini games with this user's play entitlement.
+  static const String miniGames = '/api/mini-games';
+
+  /// GET - Get a single mini game by its code.
+  static String miniGame(String code) => '/api/mini-games/$code';
+
+  /// POST - Spend an attempt and start the cooldown. 409 when locked.
+  static String miniGamePlay(String code) => '/api/mini-games/$code/play';
+
+  /// PATCH - Report the final score of a finished run. Does not spend an
+  /// attempt; 409 if that run was already scored.
+  static String miniGamePlayScore(int playId) =>
+      '/api/mini-games/plays/$playId/score';
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Avatar cosmetics (BR-7JRBCN)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// GET - Full cosmetics catalog. Readable without a token.
+  static const String avatarCatalog = '/api/avatar/catalog';
+
+  /// GET - The caller's worn outfit and owned items.
+  /// PUT - Replace the worn outfit (whole slot map at once).
+  static const String userAvatar = '/api/user/avatar';
+
+  /// POST - Acquire an item. Free during the launch period.
+  static String avatarPurchase(String code) =>
+      '/api/avatar/items/$code/purchase';
+
 }

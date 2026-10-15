@@ -1,0 +1,42 @@
+{
+  "name": "Fire",
+  "version": 1,
+  "colors": {
+    "primary": "#F2A65A",
+    "primaryDark": "#4E342E",
+    "background": "#FBF1E6",
+    "gradientPurple": "#C97B4A",
+    "authGradientTop": "#C97B4A",
+    "authGradientBottom": "#8A4B2D",
+    "surface": "#FFFFFF",
+
+    "success": "#2FBE87",
+    "orange": "#FF7128",
+    "warning": "#FF9800",
+    "error": "#E53935",
+    "errorLight": "#FF6B6B",
+
+    "surfaceLight": "#F5E3D3",
+    "progressTrack": "#EFD9C4",
+    "progressFill": "#F2A65A",
+    "quizPurple": "#E07856",
+    "inputBg": "#F6E7D5",
+    "infoBg": "#FDF4EA",
+    "disabled": "#9A8A7C",
+    "disabledButton": "#CBBBAE",
+    "progressBorder": "#C09468",
+
+    "successBg": "#E8F5E9",
+    "errorBg": "#FFEBEE",
+    "hintBg": "#FFF8E1",
+    "hintBorder": "#FFD54F",
+    "hintIconColor": "#FFA000",
+    "orangeBg": "#FBE9E7",
+    "successBgLight": "#E8F5E9",
+    "videoDark": "#3B2318",
+    "hintIcon": "#FFE082",
+    "gradientGold": "#FFD54F",
+    "navScrimTop": "#A87B58",
+    "navScrimBottom": "#54301C"
+  }
+}

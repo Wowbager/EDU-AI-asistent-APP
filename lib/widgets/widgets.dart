@@ -1,12 +1,24 @@
 // Barrel file for all widgets
 export 'course_card.dart';
+export 'global_quiz_entry_dialog.dart';
 export 'section_header.dart';
 export 'card_carousel.dart';
 export 'promo_card.dart';
 export 'in_progress_card.dart';
 export 'kurzy_course_card.dart';
+export 'course_grid_card.dart';
+export 'course_cover_image.dart';
 export 'filter_chip_row.dart';
 export 'stat_card.dart';
+export 'big_stat_card.dart';
 export 'welcome_card.dart';
 export 'profile_drawer.dart';
 export 'page_header.dart';
+export 'language_switcher.dart';
+export 'coin_badge.dart';
+export 'shop_item_card.dart';
+export 'continue_lesson_card.dart';
+export 'progress_ring_card.dart';
+export 'recent_activity_card.dart';
+export 'themed_svg.dart';
+export 'user_avatar.dart';

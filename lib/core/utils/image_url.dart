@@ -8,7 +8,12 @@ import '../network/api_endpoints.dart';
 /// On native platforms CORS doesn't apply, so URLs are returned unchanged.
 String resolveImageUrl(String url) {
   if (!kIsWeb) return url;
+  return proxyImageUrl(url);
+}
 
+/// [url] routed through the Laravel API image proxy, on any platform.
+/// Anything that isn't an http(s) URL is returned unchanged.
+String proxyImageUrl(String url) {
   if (url.startsWith('https://') || url.startsWith('http://')) {
     return '${ApiEndpoints.baseUrl}${ApiEndpoints.proxyImage}?url=${Uri.encodeComponent(url)}';
   }

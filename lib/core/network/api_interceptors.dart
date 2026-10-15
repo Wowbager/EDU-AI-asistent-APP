@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 
 import '../services/auth_token_storage.dart';
 import '../services/session_meta.dart';
+import '../strings/locale_manager.dart';
 import 'api_endpoints.dart';
 
 /// Keys for storing auth data.
@@ -15,6 +16,19 @@ class AuthStorageKeys {
 }
 
 /// Interceptor that adds the Bearer token to authenticated requests.
+/// Tags every request with the UI language so the backend can answer in it.
+///
+/// Read per request rather than baked into `BaseOptions.headers`, because the
+/// user can switch language at any time and the `Dio` instance outlives that
+/// change. Today the backend only uses this for the verification e-mail.
+class LocaleInterceptor extends Interceptor {
+  @override
+  void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
+    options.headers['Accept-Language'] = LocaleManager.current.code;
+    handler.next(options);
+  }
+}
+
 class AuthInterceptor extends Interceptor {
   final AuthTokenStorage _tokens;
 
@@ -154,7 +168,9 @@ class RetryInterceptor extends Interceptor {
   void onError(DioException err, ErrorInterceptorHandler handler) async {
     final retryCount = (err.requestOptions.extra['retryCount'] as int?) ?? 0;
 
-    final shouldRetry = _isRetryableError(err) && retryCount < _maxRetries;
+    final shouldRetry = _isRetryable(err.requestOptions) &&
+        _isRetryableError(err) &&
+        retryCount < _maxRetries;
 
     if (shouldRetry) {
       final delay = Duration(milliseconds: 1000 * (retryCount + 1));
@@ -173,6 +189,18 @@ class RetryInterceptor extends Interceptor {
     }
 
     handler.next(err);
+  }
+
+  /// Only auto-retry idempotent requests. Retrying a POST/PUT/PATCH/DELETE that
+  /// timed out is unsafe: the server may have already processed the first call,
+  /// so a blind resend duplicates the side effect. This bit chat messages
+  /// (BR-NT8CEC) — the slow first-message POST timed out client-side, got
+  /// resent, and the server created a second user+assistant pair, surfacing as
+  /// the block context appearing twice. GET/HEAD carry no side effects, so the
+  /// sync/read traffic that actually benefits from retries is unaffected.
+  bool _isRetryable(RequestOptions options) {
+    final method = options.method.toUpperCase();
+    return method == 'GET' || method == 'HEAD';
   }
 
   bool _isRetryableError(DioException err) {

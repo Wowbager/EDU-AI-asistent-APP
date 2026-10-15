@@ -4,12 +4,17 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Supported UI locales.
 enum AppLocale {
-  cs('cs', 'Čeština'),
-  en('en', 'English');
+  cs('cs', 'Čeština', 'CZ'),
+  sk('sk', 'Slovenčina', 'SK'),
+  en('en', 'English', 'EN');
 
   final String code;
   final String displayName;
-  const AppLocale(this.code, this.displayName);
+
+  /// Two-letter label for compact switchers (login, welcome).
+  final String shortLabel;
+
+  const AppLocale(this.code, this.displayName, this.shortLabel);
 
   Locale toFlutterLocale() => Locale(code);
 

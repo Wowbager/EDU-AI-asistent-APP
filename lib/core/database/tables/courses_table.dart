@@ -30,6 +30,15 @@ class CoursesTable extends Table {
   /// JSON-encoded course data (lessons, exercises, etc.).
   TextColumn get data => text().withDefault(const Constant('{}'))();
 
+  /// Course-level "only once" flag (typically a test): the course cannot be
+  /// re-entered after completion and none of its blocks may feed practice.
+  ///
+  /// Denormalised out of [data] on write (see `AppDatabase.upsertCourse`) so
+  /// the practice queue can filter on it with a two-column lookup instead of
+  /// decoding every course JSON — a course blob carries its blocks and can run
+  /// to megabytes (BR-E495XK).
+  BoolColumn get onlyOnce => boolean().withDefault(const Constant(false))();
+
   /// Sync status: 0=synced, 1=pending, 2=conflict.
   IntColumn get syncStatus => integer().withDefault(const Constant(0))();
 

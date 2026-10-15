@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../core/theme/app_theme.dart';
 import '../models/course_model.dart';
 import '../core/strings/app_strings.dart';
+import '../core/layout/breakpoints.dart';
 
 /// Exercise Page for practicing course content
 class ExercisePage extends StatefulWidget {
@@ -123,7 +124,12 @@ class _ExercisePageState extends State<ExercisePage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ContentWidth(maxWidth: ContentWidth.reading, child: _buildPage(context));
+
+  /// This page has no wide layout yet, so [ContentWidth] keeps it at phone
+  /// width instead of stretching it across a monitor.
+  Widget _buildPage(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
       body: Column(

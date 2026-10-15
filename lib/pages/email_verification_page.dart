@@ -6,6 +6,8 @@ import '../core/providers/core_providers.dart';
 import '../core/theme/app_theme.dart';
 import '../features/email_validation/providers/email_validation_providers.dart';
 import '../core/strings/app_strings.dart';
+import '../core/layout/breakpoints.dart';
+import '../widgets/auth_hero_scaffold.dart';
 
 /// Full-screen page for email verification during registration/login.
 class EmailVerificationPage extends ConsumerStatefulWidget {
@@ -15,11 +17,20 @@ class EmailVerificationPage extends ConsumerStatefulWidget {
   final void Function(bool needsProfileSetup, bool isEmailValidated) onVerified;
   final VoidCallback? onBack;
 
+  /// Asked once the code proves the email has no account yet — i.e. when
+  /// continuing would register rather than sign in — and before continuing
+  /// offline without a code, which creates a local account no server has
+  /// checked (BR-J2WJEQ). Returning false abandons the flow before anything
+  /// is created; the caller owns what happens next (the age gate, and the
+  /// guardian consent flow behind it — BR-N9Y48J).
+  final Future<bool> Function()? onNewAccount;
+
   const EmailVerificationPage({
     super.key,
     required this.email,
     required this.onVerified,
     this.onBack,
+    this.onNewAccount,
   });
 
   @override
@@ -59,6 +70,25 @@ class _EmailVerificationPageState extends ConsumerState<EmailVerificationPage> {
 
     setState(() => _isOffline = false);
     _sendCode();
+  }
+
+  /// "Continue without verification": the account is created on this device
+  /// and nobody has checked whether the address already has one, so as far as
+  /// the app can tell this is a registration. It passes the same age gate an
+  /// online one does. AuthPage's account check could not have asked, since it
+  /// could not reach the server either. Otherwise going offline was a way
+  /// round the gate, and with it the guardian consent flow (BR-J2WJEQ).
+  Future<void> _continueOffline() async {
+    final gate = widget.onNewAccount;
+    final screened = ref
+        .read(emailVerificationProvider.notifier)
+        .wasScreenedAsNew(widget.email);
+    // A "no" or a back-out leaves the caller in charge (consent request,
+    // back to the login form). Nothing has been created at that point.
+    if (gate != null && !screened && !await gate()) return;
+    if (!mounted) return;
+    // User needs profile setup, email NOT validated.
+    widget.onVerified(true, false);
   }
 
   void _showOfflineDialog() {
@@ -110,8 +140,7 @@ class _EmailVerificationPageState extends ConsumerState<EmailVerificationPage> {
           ElevatedButton(
             onPressed: () {
               Navigator.of(context).pop();
-              // Continue without verification - user needs profile setup, email NOT validated
-              widget.onVerified(true, false);
+              _continueOffline();
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.primaryDark,
@@ -222,13 +251,24 @@ class _EmailVerificationPageState extends ConsumerState<EmailVerificationPage> {
 
   Future<void> _verifyCode() async {
     final notifier = ref.read(emailVerificationProvider.notifier);
-    await notifier.verifyCode(_pin);
+    await notifier.verifyCode(_pin, onNewAccount: widget.onNewAccount);
   }
+
+  /// Fixed share of the screen the sheet takes. The login screen animates its
+  /// sheet between 0.52 (welcome) and 0.72 (sign-up); this step has one fixed
+  /// form, so it stays at the welcome height.
+  static const double _sheetHeightFraction = 0.52;
+
+  /// Hero placement constants, mirrored from [AuthPage] so this stop on the
+  /// auth journey stands the mascot on the wave exactly as the login screen
+  /// does. See `auth_page.dart` for the derivations.
+  static const double _waveCompactZoom = 1.5;
+  static const double _heroWaveOverlap = 0.4;
+  static const double _heroTopGap = 8;
 
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(emailVerificationProvider);
-    final screenHeight = MediaQuery.of(context).size.height;
 
     // Listen for verification success
     ref.listen(emailVerificationProvider, (previous, current) {
@@ -242,6 +282,14 @@ class _EmailVerificationPageState extends ConsumerState<EmailVerificationPage> {
       }
     });
 
+    // Landscape tablet / desktop: the shared hero-scene scaffold draws the
+    // illustration and puts the form in the right-hand panel — the same
+    // scaffold the login screen and the child-onboarding steps use, so every
+    // stop on the journey keeps one backdrop.
+    if (context.isExpanded) {
+      return AuthHeroScaffold(panel: _buildFormColumn(state));
+    }
+
     return Scaffold(
       body: Container(
         width: double.infinity,
@@ -249,99 +297,130 @@ class _EmailVerificationPageState extends ConsumerState<EmailVerificationPage> {
         decoration: BoxDecoration(
           gradient: AppColors.authGradient,
         ),
-        child: Stack(
-          children: [
-            // Background decorative image
-            Positioned(
-              bottom: screenHeight * 0.52 - 20,
-              left: 0,
-              right: 0,
-              child: Image.asset(
-                'assets/images/login_bg.png',
-                fit: BoxFit.cover,
-                width: double.infinity,
-              ),
-            ),
-            // Logo
-            Positioned(
-              bottom: screenHeight * 0.52 + 60,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: Image.asset(
-                  'assets/images/login_logo.png',
-                  width: 276,
-                ),
-              ),
-            ),
-            // White form container
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              height: screenHeight * 0.52,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: AppColors.surface,
-                  borderRadius: BorderRadius.only(
-                    topLeft: Radius.circular(32),
-                    topRight: Radius.circular(32),
-                  ),
-                ),
-                child: SafeArea(
-                  top: false,
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.fromLTRB(24, 32, 24, 24),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Back button
-                        if (widget.onBack != null)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 16),
-                            child: GestureDetector(
-                              onTap: widget.onBack,
-                              child: Container(
-                                width: 40,
-                                height: 40,
-                                decoration: BoxDecoration(
-                                  color: AppColors.primaryDark08,
-                                  shape: BoxShape.circle,
-                                ),
-                                child: Icon(
-                                  Icons.arrow_back,
-                                  color: AppColors.primaryDark,
-                                  size: 20,
-                                ),
-                              ),
-                            ),
-                          ),
-
-                        // Title
-                        Text(
-                          AppStrings.emailVerificationTitle,
-                          style: AppTextStyles.heading1().copyWith(height: 1.2),
-                        ),
-                        const SizedBox(height: 8),
-
-                        // Email display
-                        Text(
-                          widget.email,
-                          style: AppTextStyles.bodyLarge(color: AppColors.primaryDark64),
-                        ),
-                        const SizedBox(height: 24),
-
-                        // Content based on state
-                        _buildContent(state),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
+        child: _buildSheetLayout(context, state),
       ),
+    );
+  }
+
+  /// Phone / portrait tablet: illustration on top, white sheet over the bottom,
+  /// matching [AuthPage]'s bottom-sheet layout.
+  Widget _buildSheetLayout(BuildContext context, EmailVerificationState state) {
+    final mq = MediaQuery.of(context);
+    final screenHeight = mq.size.height;
+
+    // Cap the card height so its top never rises above the top safe-area inset
+    // once the keyboard opens (BR-PXB3N3).
+    final maxContainerHeight =
+        mq.size.height - mq.viewInsets.bottom - mq.padding.top;
+    final containerHeight = maxContainerHeight <= 0
+        ? screenHeight * _sheetHeightFraction
+        : (screenHeight * _sheetHeightFraction)
+            .clamp(0.0, maxContainerHeight)
+            .toDouble();
+    final bgBottom = containerHeight - 20;
+
+    // The composition stands on the wave, so it is anchored to the wave's top
+    // edge and gets whatever room is left up to the status bar.
+    final waveHeight = mq.size.width * _waveCompactZoom * kAuthWaveAspectRatio;
+    final heroBottom = bgBottom + waveHeight * (1 - _heroWaveOverlap);
+    final heroBand =
+        mq.size.height - mq.padding.top - _heroTopGap - heroBottom;
+
+    return Stack(
+      children: [
+        // Ground wave, tucked just behind the top edge of the card.
+        Positioned(
+          bottom: bgBottom,
+          left: -(mq.size.width * (_waveCompactZoom - 1)) / 2,
+          child: buildAuthWave(width: mq.size.width * _waveCompactZoom),
+        ),
+        // Wordmark + the mascot standing on the wave, drawn after it so the
+        // props sit in front.
+        Positioned(
+          bottom: heroBottom,
+          left: 0,
+          right: 0,
+          child: AuthCompactHero(maxHeight: heroBand),
+        ),
+        // White form container
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: containerHeight,
+          child: Container(
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(26),
+                topRight: Radius.circular(26),
+              ),
+            ),
+            child: SafeArea(
+              top: false,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(32, 32, 32, 24),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(
+                      maxWidth: kAuthFormColumnWidth,
+                    ),
+                    child: _buildFormColumn(state),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// The form itself — back button, title, email and the state-specific body.
+  /// Shared by both layouts so the two never drift apart.
+  Widget _buildFormColumn(EmailVerificationState state) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Back button
+        if (widget.onBack != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: GestureDetector(
+              onTap: widget.onBack,
+              child: Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: AppColors.primaryDark08,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.arrow_back,
+                  color: AppColors.primaryDark,
+                  size: 20,
+                ),
+              ),
+            ),
+          ),
+
+        // Title
+        Text(
+          AppStrings.emailVerificationTitle,
+          style: AppTextStyles.heading1().copyWith(height: 1.2),
+        ),
+        const SizedBox(height: 8),
+
+        // Email display
+        Text(
+          widget.email,
+          style: AppTextStyles.bodyLarge(color: AppColors.primaryDark64),
+        ),
+        const SizedBox(height: 24),
+
+        // Content based on state
+        _buildContent(state),
+      ],
     );
   }
 

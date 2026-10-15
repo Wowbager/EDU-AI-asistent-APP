@@ -3,7 +3,11 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../core/theme/app_theme.dart';
 import '../core/strings/app_strings.dart';
 import '../core/strings/locale_manager.dart';
+import '../core/util/decimal_display.dart';
+import '../widgets/detail_shell.dart';
 import '../widgets/page_header.dart';
+import '../widgets/user_avatar.dart';
+import '../core/layout/breakpoints.dart';
 
 /// Profile page with user info, stats, and settings.
 ///
@@ -28,7 +32,9 @@ class ProfilePage extends StatefulWidget {
   final VoidCallback? onAchievementsTap;
   final VoidCallback? onLibraryTap;
   final Future<String?> Function()? onEditProfileTap;
+  final VoidCallback? onAvatarTap;
   final VoidCallback? onPrivacyTap;
+  final VoidCallback? onDoplnkyTap;
   final Function(bool)? onNotificationsChanged;
   final VoidCallback? onLanguageTap;
   final VoidCallback? onThemeTap;
@@ -36,16 +42,6 @@ class ProfilePage extends StatefulWidget {
   final VoidCallback? onTermsTap;
   final VoidCallback? onLogoutTap;
   final bool isGuest;
-
-  // Avatar options matching profile_setup_page.dart
-  static final List<Map<String, dynamic>> avatarOptions = [
-    {'emoji': '🦊', 'bg': AppColors.avatarFox},
-    {'emoji': '🐼', 'bg': AppColors.avatarPanda},
-    {'emoji': '🦁', 'bg': AppColors.avatarLion},
-    {'emoji': '🐸', 'bg': AppColors.avatarFrog},
-    {'emoji': '🦉', 'bg': AppColors.avatarOwl},
-    {'emoji': '🐱', 'bg': AppColors.avatarCat},
-  ];
 
   const ProfilePage({
     super.key,
@@ -63,7 +59,9 @@ class ProfilePage extends StatefulWidget {
     this.onAchievementsTap,
     this.onLibraryTap,
     this.onEditProfileTap,
+    this.onAvatarTap,
     this.onPrivacyTap,
+    this.onDoplnkyTap,
     this.onNotificationsChanged,
     this.onLanguageTap,
     this.onThemeTap,
@@ -77,7 +75,7 @@ class ProfilePage extends StatefulWidget {
   State<ProfilePage> createState() => _ProfilePageState();
 }
 
-class _ProfilePageState extends State<ProfilePage> {
+class _ProfilePageState extends State<ProfilePage> with ThemeAwareState {
   late bool _notificationsEnabled;
   late String _displayName;
 
@@ -90,6 +88,33 @@ class _ProfilePageState extends State<ProfilePage> {
 
   @override
   Widget build(BuildContext context) {
+    if (context.widthClass == WidthClass.compact) {
+      return _buildPage(context, showHeader: true);
+    }
+
+    // On a wide viewport this is a pushed route sitting above the shell, so
+    // without its own copy of the sidebar the user drops out of the navigation
+    // entirely and the only way on is the back button (BR-5JSXBV). Same
+    // treatment every other pushed page gets — see `DoplnkyPage`.
+    return DetailShell(
+      title: AppStrings.profileTitle,
+      onBack: widget.onBack,
+      // The account page itself: lit *and* not a button (BR-NYNNM8).
+      isAccountPage: true,
+      child: ContentWidth(
+        maxWidth: ContentWidth.reading,
+        child: _buildPage(context, showHeader: false),
+      ),
+    );
+  }
+
+  /// [ContentWidth] keeps the settings list at a readable measure instead of
+  /// stretching its rows across a monitor.
+  ///
+  /// [showHeader] is off beside the sidebar: `DetailShell`'s top bar already
+  /// carries the title and the back link, so drawing [PageHeader] too would
+  /// print the heading twice.
+  Widget _buildPage(BuildContext context, {required bool showHeader}) {
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
@@ -98,11 +123,13 @@ class _ProfilePageState extends State<ProfilePage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const SizedBox(height: 16),
-              PageHeader(
-                title: AppStrings.profileTitle,
-                onBack: widget.onBack,
-              ),
-              const SizedBox(height: 24),
+              if (showHeader) ...[
+                PageHeader(
+                  title: AppStrings.profileTitle,
+                  onBack: widget.onBack,
+                ),
+                const SizedBox(height: 24),
+              ],
               // User info section
               _buildUserInfo(),
               const SizedBox(height: 24),
@@ -127,6 +154,12 @@ class _ProfilePageState extends State<ProfilePage> {
                       }
                     }
                   },
+                ),
+                _buildDivider(),
+                _buildSettingsItem(
+                  icon: Icons.checkroom_rounded,
+                  label: AppStrings.profileEditAvatar,
+                  onTap: widget.onAvatarTap,
                 ),
                 _buildDivider(),
                 _buildSettingsItem(
@@ -165,6 +198,12 @@ class _ProfilePageState extends State<ProfilePage> {
               const SizedBox(height: 8),
               _buildSettingsCard([
                 _buildSettingsItem(
+                  icon: Icons.extension_outlined,
+                  label: AppStrings.doplnkyTitle,
+                  onTap: widget.onDoplnkyTap,
+                ),
+                _buildDivider(),
+                _buildSettingsItem(
                   icon: Icons.info_outline,
                   label: AppStrings.profileAbout,
                   onTap: widget.onAboutTap,
@@ -191,27 +230,12 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Widget _buildUserInfo() {
-    final avatar = ProfilePage.avatarOptions[widget.avatarIndex.clamp(0, ProfilePage.avatarOptions.length - 1)];
-
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         children: [
           // Avatar
-          Container(
-            width: 72,
-            height: 72,
-            decoration: BoxDecoration(
-              color: avatar['bg'] as Color,
-              shape: BoxShape.circle,
-            ),
-            child: Center(
-              child: Text(
-                avatar['emoji'] as String,
-                style: const TextStyle(fontSize: 36),
-              ),
-            ),
-          ),
+          UserAvatar(size: 72, avatarIndex: widget.avatarIndex),
           const SizedBox(width: 16),
           // Name, email, level
           Expanded(
@@ -414,18 +438,35 @@ class _ProfilePageState extends State<ProfilePage> {
         return AlertDialog(
           title: Text(AppStrings.profileLanguage),
           contentPadding: const EdgeInsets.symmetric(vertical: 8),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (final locale in AppLocale.values)
-                ListTile(
-                  title: Text(locale.displayName),
-                  trailing: locale == LocaleManager.current
-                      ? Icon(Icons.check, color: AppColors.primary)
-                      : null,
-                  onTap: () => Navigator.of(ctx).pop(locale),
-                ),
-            ],
+          content: SizedBox(
+            // Pin the width. AlertDialog otherwise sizes itself to the
+            // intrinsic width of its content, which leaves the language name
+            // squeezed next to the check icon and wraps it mid-word
+            // ("Češti / na"). Shrink on narrow screens so the dialog still
+            // fits inside the 40px inset padding on each side.
+            width: (MediaQuery.sizeOf(ctx).width - 80).clamp(0.0, 320.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final locale in AppLocale.values)
+                  ListTile(
+                    title: Text(
+                      locale.displayName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    // Keep the trailing slot occupied on every row so the
+                    // title width does not change with the selection.
+                    trailing: SizedBox(
+                      width: 24,
+                      child: locale == LocaleManager.current
+                          ? Icon(Icons.check, color: AppColors.primary)
+                          : null,
+                    ),
+                    onTap: () => Navigator.of(ctx).pop(locale),
+                  ),
+              ],
+            ),
           ),
           actions: [
             TextButton(
@@ -614,13 +655,13 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
+  /// Both branches used dot-and-comma English notation, which in Czech reads
+  /// as the wrong number entirely — "1,234" is one and a bit, not a thousand
+  /// (BR-5DZ6JD). Separators now follow the active locale.
   String _formatNumber(int number) {
     if (number >= 1000) {
-      return '${(number / 1000).toStringAsFixed(number % 1000 == 0 ? 0 : 1)}k';
+      return '${formatDecimal(number / 1000, fractionDigits: number % 1000 == 0 ? 0 : 1)}k';
     }
-    return number.toString().replaceAllMapped(
-          RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'),
-          (Match m) => '${m[1]},',
-        );
+    return formatGrouped(number);
   }
 }

@@ -1,40 +1,31 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'root_navigator.dart';
-
 /// Holds a course join code/PIN captured from a `/course/:code` or `/pin/:code`
-/// deep link until the app reaches the main screen, which enrolls and opens it.
-/// Both URL shapes resolve the same way (by course code/PIN).
+/// deep link until a screen that can act on it appears — `AuthPage` when the
+/// visitor is logged out, `MainScreen` when they are not. Both URL shapes
+/// resolve the same way (by course code/PIN).
+///
+/// `ShellEntry` is what records it: the deep links share their route with the
+/// rest of the signed-in app, so the landing widget is the same one every shell
+/// URL uses.
 final pendingDeepLinkCodeProvider = StateProvider<String?>((ref) => null);
 
-/// Landing widget for the deep-link routes. It records the code, then hands off
-/// to the normal [AuthWrapper] boot flow (auth/guest → main). Once the app is at
-/// the main screen, MainScreen consumes the pending code and opens the course.
-class DeepLinkEntry extends ConsumerStatefulWidget {
-  final String code;
+/// Holds the mentor slug from a `/chat/:mentor` deep link until `ChatyPage`
+/// appears and can start the conversation.
+///
+/// Separate from [pendingDeepLinkCodeProvider] on purpose: a slug is not a
+/// course code, and the login screen's PIN flow must not try to resolve one.
+/// `ShellEntry` records it and points the shell at the chat tab; the page
+/// itself is what creates the session, because that is where the new-chat
+/// picker already does it (BR-HCF5AS).
+final pendingChatMentorSlugProvider = StateProvider<String?>((ref) => null);
 
-  const DeepLinkEntry({super.key, required this.code});
-
-  @override
-  ConsumerState<DeepLinkEntry> createState() => _DeepLinkEntryState();
-}
-
-class _DeepLinkEntryState extends ConsumerState<DeepLinkEntry> {
-  @override
-  void initState() {
-    super.initState();
-    // Record the code after this frame — modifying a provider during a widget
-    // life-cycle (initState/build) is disallowed by Riverpod. This still runs
-    // before MainScreen builds: AuthWrapper always shows a loading frame first
-    // while it checks auth asynchronously, so the code is present in time.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (widget.code.isNotEmpty) {
-        ref.read(pendingDeepLinkCodeProvider.notifier).state = widget.code;
-      }
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) => const AuthWrapper();
-}
+/// Holds the class code from a `/join/:code` link (BR-TT6TD7) until the
+/// signed-in app can act on it — see `joinClassroomFromDeepLink`.
+///
+/// Separate from [pendingDeepLinkCodeProvider] for the same reason as the
+/// mentor slug: the login screen resolves that one as a course PIN. A class
+/// code needs an account instead, so a logged-out visitor just gets the login
+/// screen and the code waits here until `MainScreen` is up with a real
+/// account — a guest is asked to log in first, and the code survives that.
+final pendingClassroomJoinCodeProvider = StateProvider<String?>((ref) => null);

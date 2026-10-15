@@ -54,6 +54,8 @@ class ApiClient implements OAuthApiPort {
       ),
     );
 
+    _dio.interceptors.add(LocaleInterceptor());
+
     // Add interceptors in order. Token rotation must come before AuthInterceptor
     // so the rotated token is attached to the in-flight request.
     final session = _session;
@@ -110,17 +112,24 @@ class ApiClient implements OAuthApiPort {
   }
 
   /// Perform a POST request.
+  ///
+  /// [receiveTimeout] replaces the client-wide 30s for this one call, for
+  /// endpoints that legitimately take longer to answer (AI evaluation).
   Future<ApiResult<T>> post<T>(
     String path, {
     dynamic data,
     Map<String, dynamic>? queryParameters,
     T Function(dynamic)? fromJson,
+    Duration? receiveTimeout,
   }) async {
     try {
       final response = await _dio.post(
         path,
         data: data,
         queryParameters: queryParameters,
+        options: receiveTimeout == null
+            ? null
+            : Options(receiveTimeout: receiveTimeout),
       );
 
       final result =
@@ -138,9 +147,10 @@ class ApiClient implements OAuthApiPort {
   /// ("this is my device", BR-CAQQW2). Re-issues the token via the refresh
   /// endpoint with an explicit `shared_device: false`, so the server drops the
   /// shared flag and grants a 30-day token. On success the new token and
-  /// session metadata are stored, and the pre-login default for this device is
-  /// switched to persistent so future logins stay signed in. Returns true on
-  /// success.
+  /// session metadata are stored. The pre-login default for the device is left
+  /// alone on purpose: this is consent for the *current* session, not for the
+  /// machine, and carrying it over would pre-tick the opt-out for the next
+  /// person on a shared PC (BR-4TASK2). Returns true on success.
   Future<bool> convertSessionToPersistent() async {
     try {
       final response = await _dio.post(
@@ -155,8 +165,9 @@ class ApiClient implements OAuthApiPort {
         await _tokens.setToken(newToken);
       }
       // Genuine user action — mark active so any residual idle state is reset.
+      // applyFromAuthResponse writes session_shared_device=false, which is what
+      // hides the banner and stops the idle timer for this session.
       await _session?.applyFromAuthResponse(data);
-      await _session?.setPendingSharedDevice(false);
       return (data['shared_device'] as bool?) == false;
     } catch (_) {
       return false;
@@ -172,6 +183,31 @@ class ApiClient implements OAuthApiPort {
   }) async {
     try {
       final response = await _dio.put(
+        path,
+        data: data,
+        queryParameters: queryParameters,
+      );
+
+      final result =
+          fromJson != null ? fromJson(response.data) : response.data as T;
+
+      return ApiResult.success(result, statusCode: response.statusCode);
+    } on DioException catch (e) {
+      return _handleError(e);
+    } catch (e) {
+      return ApiResult.failure(e.toString());
+    }
+  }
+
+  /// Perform a PATCH request.
+  Future<ApiResult<T>> patch<T>(
+    String path, {
+    dynamic data,
+    Map<String, dynamic>? queryParameters,
+    T Function(dynamic)? fromJson,
+  }) async {
+    try {
+      final response = await _dio.patch(
         path,
         data: data,
         queryParameters: queryParameters,

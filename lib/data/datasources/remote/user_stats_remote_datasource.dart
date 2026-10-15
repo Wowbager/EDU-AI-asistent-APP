@@ -10,6 +10,8 @@ class RemoteUserStats {
   final int coursesCount;
   final int streakDays;
   final int achievementsCount;
+  final int coinsEarned;
+  final int coinsBalance;
   final DateTime? lastStreakDate;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -22,6 +24,8 @@ class RemoteUserStats {
     required this.coursesCount,
     required this.streakDays,
     required this.achievementsCount,
+    this.coinsEarned = 0,
+    this.coinsBalance = 0,
     this.lastStreakDate,
     required this.createdAt,
     required this.updatedAt,
@@ -36,6 +40,10 @@ class RemoteUserStats {
       coursesCount: json['courses_count'] as int? ?? 0,
       streakDays: json['streak_days'] as int? ?? 0,
       achievementsCount: json['achievements_count'] as int? ?? 0,
+      // Absent when the app talks to an API older than the wallet — a zero
+      // there is "not reported", and the local total stays whatever it was.
+      coinsEarned: json['coins_earned'] as int? ?? 0,
+      coinsBalance: json['coins_balance'] as int? ?? 0,
       lastStreakDate: json['last_streak_date'] != null
           ? DateTime.parse(json['last_streak_date'] as String)
           : null,
@@ -53,6 +61,8 @@ class RemoteUserStats {
       'courses_count': coursesCount,
       'streak_days': streakDays,
       'achievements_count': achievementsCount,
+      'coins_earned': coinsEarned,
+      'coins_balance': coinsBalance,
       'last_streak_date': lastStreakDate?.toIso8601String(),
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),

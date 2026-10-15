@@ -7,8 +7,11 @@ import '../core/providers/core_providers.dart';
 import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
 import '../models/chat_models.dart';
+import '../routing/deep_link.dart';
 import '../widgets/filter_chip_row.dart';
 import 'chat_detail_page.dart';
+import 'new_chat_page.dart';
+import '../core/layout/breakpoints.dart';
 
 /// Chaty (Chats) page displaying list of conversations backed by Drift DB.
 class ChatyPage extends ConsumerStatefulWidget {
@@ -18,12 +21,122 @@ class ChatyPage extends ConsumerStatefulWidget {
   ConsumerState<ChatyPage> createState() => _ChatyPageState();
 }
 
+/// The conversation shown in the wide layout's right-hand pane.
+class _OpenChat {
+  final String sessionId;
+  final String title;
+  final ChatPersona persona;
+
+  const _OpenChat({
+    required this.sessionId,
+    required this.title,
+    required this.persona,
+  });
+}
+
 class _ChatyPageState extends ConsumerState<ChatyPage> {
   int _selectedFilterIndex = 0;
   final List<String> _filters = [AppStrings.filterAll, AppStrings.filterInProgress, AppStrings.chatyEndedFilter];
 
+  /// Width of the conversation list beside the open chat.
+  static const double _listWidth = 360;
+
+  /// Wide layout only. Null until a conversation is picked.
+  _OpenChat? _openChat;
+
+  bool get _isWide => context.widthClass != WidthClass.compact;
+
+  @override
+  void initState() {
+    super.initState();
+    // A `/chat/:mentor` link that landed here on boot: the slug was parked
+    // before this page existed, so nothing would notify us of it.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final slug = ref.read(pendingChatMentorSlugProvider);
+      if (slug != null && slug.isNotEmpty) _openMentorDeepLink(slug);
+    });
+  }
+
+  /// Open a conversation: a pane on wide, a pushed route on a phone.
+  void _openSession(BuildContext context, _OpenChat chat) {
+    if (_isWide) {
+      setState(() => _openChat = chat);
+      return;
+    }
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ChatDetailPage(
+          sessionId: chat.sessionId,
+          sessionTitle: chat.title,
+          persona: chat.persona,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // And a link that arrives while the tab is already showing: the shell
+    // route is reused across URLs, so this page is not rebuilt from scratch.
+    ref.listen<String?>(pendingChatMentorSlugProvider, (_, slug) {
+      if (slug != null && slug.isNotEmpty) _openMentorDeepLink(slug);
+    });
+
+    if (!_isWide) {
+      return ContentWidth(
+        maxWidth: ContentWidth.reading,
+        child: _buildPage(context),
+      );
+    }
+
+    // Two panes: conversations on the left, the open one on the right. The
+    // phone flow pushes the detail as a route; here it is embedded, so the
+    // list stays visible and switching chats does not animate the whole view.
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SizedBox(width: _listWidth, child: _buildPage(context)),
+        Container(width: 1, color: AppColors.primaryDark08),
+        Expanded(
+          child: _openChat == null
+              ? _buildNoChatSelected()
+              : ChatDetailPage(
+                  // Keyed by session so switching conversations rebuilds the
+                  // state (messages, stream subscription) instead of reusing
+                  // the previous chat's.
+                  key: ValueKey(_openChat!.sessionId),
+                  sessionId: _openChat!.sessionId,
+                  sessionTitle: _openChat!.title,
+                  persona: _openChat!.persona,
+                  embedded: true,
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNoChatSelected() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text('💬', style: TextStyle(fontSize: 56)),
+            const SizedBox(height: 16),
+            Text(
+              AppStrings.chatyPickConversation,
+              style: AppTextStyles.body(color: AppColors.primaryDark48),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPage(BuildContext context) {
     final sessionsAsync = ref.watch(chatSessionsStreamProvider);
     final connectivityAsync = ref.watch(connectivityStateProvider);
     final isOffline = connectivityAsync.whenOrNull(
@@ -97,11 +210,15 @@ class _ChatyPageState extends ConsumerState<ChatyPage> {
   // ---------------------------------------------------------------------------
 
   Widget _buildHeader(BuildContext context) {
+    // The heading lives here on every width. On desktop it used to be dropped
+    // in favour of the shell's top bar, which left the "new chat" button a row
+    // below the title it belongs next to — and cost the conversation pane the
+    // bar's height. The shell now hides that bar for this tab (BR-7VMQ2U), so
+    // the column reclaims the space it was said to be wasting.
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         children: [
-          // Title
           Text(
             AppStrings.chatyTitle,
             style: AppTextStyles.heading1(),
@@ -109,7 +226,7 @@ class _ChatyPageState extends ConsumerState<ChatyPage> {
           const Spacer(),
           // New chat button
           GestureDetector(
-            onTap: () => _showPersonaPicker(context),
+            onTap: () => _startNewChat(context),
             child: Container(
               height: 42,
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -173,18 +290,10 @@ class _ChatyPageState extends ConsumerState<ChatyPage> {
     final bgColor = _avatarColorForPersona(persona);
 
     return GestureDetector(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => ChatDetailPage(
-              sessionId: session.id,
-              sessionTitle: title,
-              persona: persona,
-            ),
-          ),
-        );
-      },
+      onTap: () => _openSession(
+        context,
+        _OpenChat(sessionId: session.id, title: title, persona: persona),
+      ),
       onLongPress: () => _showDeleteDialog(context, session),
       child: Container(
         padding: const EdgeInsets.all(16),
@@ -299,103 +408,83 @@ class _ChatyPageState extends ConsumerState<ChatyPage> {
   }
 
   // ---------------------------------------------------------------------------
-  // Persona picker bottom sheet
+  // New chat
   // ---------------------------------------------------------------------------
 
-  void _showPersonaPicker(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: AppColors.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (ctx) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(24, 24, 24, 40),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                AppStrings.chatSelectPersona,
-                style: AppTextStyles.cardTitle(),
-              ),
-              const SizedBox(height: 24),
-              GridView.count(
-                shrinkWrap: true,
-                crossAxisCount: 2,
-                mainAxisSpacing: 12,
-                crossAxisSpacing: 12,
-                childAspectRatio: 2.2,
-                physics: const NeverScrollableScrollPhysics(),
-                children: ChatPersona.values
-                    .map((p) => _buildPersonaTile(p, context))
-                    .toList(),
-              ),
-            ],
-          ),
-        );
-      },
-    );
+  /// Open the conversation a `/chat/:mentor` deep link asked for (BR-HCF5AS).
+  ///
+  /// The link only names a mentor, so it goes through the same path as picking
+  /// one out of the new-chat list. Consumed before the session is created: the
+  /// await below gives the page time to rebuild, and a slug still sitting in
+  /// the provider would start a second chat.
+  Future<void> _openMentorDeepLink(String slug) async {
+    ref.read(pendingChatMentorSlugProvider.notifier).state = null;
+
+    // The server list first, so a mentor added in the admin resolves too; the
+    // repository already falls back to this build's mentors when it is offline
+    // or the request fails, and this adds them again in case it threw.
+    List<ChatMentor> mentors;
+    try {
+      mentors = await ref.read(chatMentorsProvider.future);
+    } catch (_) {
+      mentors = const [];
+    }
+    if (!mounted) return;
+
+    ChatMentor? mentor;
+    for (final candidate in [...mentors, ...ChatMentor.builtIns]) {
+      if (candidate.slug == slug) {
+        mentor = candidate;
+        break;
+      }
+    }
+
+    if (mentor == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(AppStrings.chatMentorNotFound(slug))),
+      );
+      return;
+    }
+
+    // Resume rather than start over: the link is a bookmark, not a "new chat"
+    // button, and on the web build reopening it is how a student comes back to
+    // the conversation (BR-VC5HPV).
+    await _createSessionAndNavigate(mentor, context, resumeExisting: true);
   }
 
-  Widget _buildPersonaTile(
-    ChatPersona persona,
-    BuildContext context,
-  ) {
-    return GestureDetector(
-      onTap: () async {
-        Navigator.pop(context); // close sheet
-        await _createSessionAndNavigate(persona, context);
-      },
-      child: Container(
-        decoration: BoxDecoration(
-          color: AppColors.background,
-          borderRadius: AppDecorations.radiusS,
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Text(persona.emoji, style: const TextStyle(fontSize: 28)),
-            const SizedBox(width: 8),
-            Flexible(
-              child: Text(
-                persona.displayName,
-                style: AppTextStyles.labelMedium(),
-                textAlign: TextAlign.center,
-                softWrap: true,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+  /// The mentor list used to be a bottom sheet of emoji tiles; it is now the
+  /// designed "Novy chat" screen (BR-E8ZQP2), which knows nothing about chat
+  /// sessions -- it hands back a mentor and this page starts the conversation.
+  Future<void> _startNewChat(BuildContext context) async {
+    final mentor = await showNewChatPicker(context);
+    if (mentor == null || !context.mounted) return;
+
+    await _createSessionAndNavigate(mentor, context);
   }
 
+  /// [resumeExisting] reopens the student's last conversation with this mentor
+  /// instead of starting another one — what a `/chat/:mentor` link means.
   Future<void> _createSessionAndNavigate(
-    ChatPersona persona,
-    BuildContext context,
-  ) async {
+    ChatMentor mentor,
+    BuildContext context, {
+    bool resumeExisting = false,
+  }) async {
     try {
       final chatRepo = ref.read(chatRepositoryProvider);
       final user = await ref.read(activeUserProvider.future);
       if (user == null) return;
 
-      final session = await chatRepo.createSession(user.id, persona);
+      final session = resumeExisting
+          ? await chatRepo.resumeOrCreateSession(user.id, mentor.slug)
+          : await chatRepo.createSession(user.id, mentor.slug);
 
       if (context.mounted) {
-        Navigator.push(
+        _openSession(
           context,
-          MaterialPageRoute(
-            builder: (_) => ChatDetailPage(
-              sessionId: session.id,
-              sessionTitle: session.title.isNotEmpty
-                  ? session.title
-                  : persona.displayName,
-              persona: persona,
-            ),
+          _OpenChat(
+            sessionId: session.id,
+            title: session.title.isNotEmpty ? session.title : mentor.name,
+            persona: mentor.persona,
           ),
         );
       }
@@ -459,6 +548,10 @@ class _ChatyPageState extends ConsumerState<ChatyPage> {
         return AppColors.cardBlue;
       case ChatPersona.languageMentor:
         return AppColors.cardBlue;
+      case ChatPersona.skolnik:
+        return AppColors.background;
+      case ChatPersona.cermatik:
+        return AppColors.successBg;
     }
   }
 

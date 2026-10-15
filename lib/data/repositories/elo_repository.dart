@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/database/app_database.dart';
 import '../../core/elo/elo_engine.dart';
+import '../../core/elo/task_difficulty.dart' as task_difficulty;
 import '../../core/sync/sync_status.dart';
 
 /// User ELO profile model for use in the UI / engine layer.
@@ -162,26 +163,31 @@ class EloRepository {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // Block Stats (item_pocet + elo_vector cache)
+  // Task difficulty (read cache of the server's calibration, BR-697NCA)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Get cached item_pocet for a block, or a zero-filled list if not cached.
-  Future<List<int>> getItemPocet(String blockId) async {
+  /// The difficulty D to answer [blockId] with: the server's calibrated value
+  /// per dimension where the last pull brought one, [contentElo] elsewhere.
+  /// The server is the only writer of D — nothing here stores it.
+  Future<List<double?>> effectiveTaskElo(
+    String blockId,
+    List<double?> contentElo,
+  ) async {
     final row = await _db.getBlockStats(blockId);
-    if (row == null) return List<int>.filled(kGpfDimensions, 0);
-    return _decodePocetVector(row.itemPocet);
+    return task_difficulty.effectiveTaskElo(
+      contentElo,
+      row == null ? null : _decodeEloVector(row.eloVector),
+    );
   }
 
-  /// Save updated block stats (item_pocet + elo_vector) locally.
-  Future<void> saveBlockStats(
-    String blockId,
-    List<int> itemPocet,
-    List<double?> eloVector,
+  /// Cached calibrated D per block for [blockIds]; blocks the server has not
+  /// calibrated are absent.
+  Future<Map<String, List<double?>>> calibratedTaskElo(
+    Iterable<String> blockIds,
   ) async {
-    await _db.upsertBlockStats(
-      blockId: blockId,
-      itemPocet: _encodePocetVector(itemPocet),
-      eloVector: _encodeEloVector(eloVector),
-    );
+    final rows = await _db.getBlockStatsFor(blockIds);
+    return {
+      for (final row in rows) row.blockId: _decodeEloVector(row.eloVector),
+    };
   }
 }

@@ -95,11 +95,18 @@ class SkillCard extends StatelessWidget {
 }
 
 /// Bar with 10 cells, numbers inside. The level cell has a purple dot,
-/// surrounding cells within ±3 have purple fill fading outward.
+/// every cell inside the confidence interval is filled with purple that
+/// steps down with distance from the level — never below a legible floor.
 class _ConfidenceBar extends StatelessWidget {
   final double level;
   final int confidenceLow;
   final int confidenceHigh;
+
+  /// Purple fill opacity per cell, indexed by the distance from the level
+  /// cell (index 0 = the level itself). Cells further out than the last
+  /// entry keep that floor value, so the edges of a confidence interval stay
+  /// clearly visible instead of fading into the background.
+  static const List<double> _shades = <double>[0.48, 0.42, 0.32, 0.24, 0.18];
 
   const _ConfidenceBar({
     required this.level,
@@ -124,20 +131,17 @@ class _ConfidenceBar extends StatelessWidget {
           final isLevel = n == levelRound;
           final isInInterval = n >= confidenceLow && n <= confidenceHigh;
 
-          // Purple opacity: strongest at level, fading linearly to edges
-          // of the confidence interval (e.g. level=7, low=4, high=10 →
-          // cells 4-10 all get purple, darkest at 7, transparent at 4 and 10).
+          // Purple opacity: strongest at the level, stepping down with the
+          // absolute distance from it (e.g. level=7, low=4, high=10 → cells
+          // 4-10 all get purple, darkest at 7, still visible at 4 and 10).
+          // Intentionally not normalised by the interval width: a narrow
+          // interval such as 5-7 would otherwise push its edges down to the
+          // faintest shade in the palette.
           double cellAlpha = 0.0;
-          if (isLevel) {
-            cellAlpha = 0.48;
-          } else if (isInInterval) {
-            // Max distance from level to interval edge
-            final maxDist = n < levelRound
-                ? (levelRound - confidenceLow).clamp(1, 9)
-                : (confidenceHigh - levelRound).clamp(1, 9);
-            // Linear fade: 1.0 at level → 0.0 at edge
-            final t = 1.0 - (distance / maxDist).clamp(0.0, 1.0);
-            cellAlpha = 0.06 + t * 0.34; // range 0.06 (edge) → 0.40 (next to level)
+          if (isLevel || isInInterval) {
+            final shadeIndex =
+                distance < _shades.length ? distance : _shades.length - 1;
+            cellAlpha = _shades[shadeIndex];
           }
 
           return Expanded(
@@ -173,7 +177,7 @@ class _ConfidenceBar extends StatelessWidget {
                         '$n',
                         style: AppTextStyles.caption(
                           color: isInInterval
-                              ? AppColors.primaryDark64
+                              ? AppColors.primaryDark88
                               : AppColors.primaryDark32,
                         ),
                       ),

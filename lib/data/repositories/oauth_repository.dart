@@ -43,6 +43,17 @@ class OAuthExchangeException implements Exception {
   String toString() => 'OAuthExchangeException: $message';
 }
 
+/// The credential is valid but no account exists behind it, and the caller
+/// asked not to create one ([OauthRepository.exchange]'s `allowRegistration`).
+/// Nothing was created server-side — the caller may run whatever guards
+/// account creation and then exchange again with registration allowed.
+class OAuthRegistrationRequiredException implements Exception {
+  OAuthRegistrationRequiredException(this.message);
+  final String message;
+  @override
+  String toString() => 'OAuthRegistrationRequiredException: $message';
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Repository
 // ═══════════════════════════════════════════════════════════════════════════
@@ -51,9 +62,16 @@ class OauthRepository {
   OauthRepository(this._api);
   final OAuthApiPort _api;
 
+  /// Exchange a provider credential for a session.
+  ///
+  /// [allowRegistration] false asks the backend to sign in only: an email with
+  /// no account behind it comes back as [OAuthRegistrationRequiredException]
+  /// with nothing created, instead of silently registering. Callers that gate
+  /// account creation (the age gate) use that to leave returning users alone.
   Future<OAuthExchangeResult> exchange(
     OAuthClientResult input, {
     bool sharedDevice = false,
+    bool allowRegistration = true,
   }) async {
     final path = switch (input.provider) {
       OAuthProvider.apple => ApiEndpoints.oauthApple,
@@ -61,7 +79,10 @@ class OauthRepository {
       OAuthProvider.microsoft => ApiEndpoints.oauthMicrosoft,
     };
 
-    final body = <String, dynamic>{'shared_device': sharedDevice};
+    final body = <String, dynamic>{
+      'shared_device': sharedDevice,
+      'allow_registration': allowRegistration,
+    };
 
     if (input.provider == OAuthProvider.apple) {
       body['identity_token'] = input.idToken;
@@ -79,6 +100,12 @@ class OauthRepository {
         await _api.post<Map<String, dynamic>>(path, data: body);
 
     if (!response.isSuccess || response.data == null) {
+      // 409 is the backend refusing to register because we asked it not to —
+      // a distinct outcome, not a failure the user should see as an error.
+      if (response.statusCode == 409) {
+        throw OAuthRegistrationRequiredException(
+            response.error ?? 'Account does not exist yet');
+      }
       throw OAuthExchangeException(response.error ?? 'OAuth exchange failed');
     }
 

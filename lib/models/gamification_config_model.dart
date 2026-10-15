@@ -275,6 +275,8 @@ class AchievementDef {
   final String description;
   final String icon;
   final int xpReward;
+  /// EDUX coins granted alongside the XP (BR-HK9828).
+  final int coinReward;
   final AchievementCondition condition;
   /// For challenges: "daily" or "weekly".
   final String? type;
@@ -287,6 +289,7 @@ class AchievementDef {
     this.description = '',
     this.icon = '',
     this.xpReward = 0,
+    this.coinReward = 0,
     required this.condition,
     this.type,
     this.category = 'trophy',
@@ -299,6 +302,7 @@ class AchievementDef {
       description: json['description'] as String? ?? '',
       icon: json['icon'] as String? ?? '',
       xpReward: json['xp_reward'] as int? ?? 0,
+      coinReward: json['coin_reward'] as int? ?? 0,
       condition: json['condition'] != null
           ? AchievementCondition.fromJson(json['condition'] as Map<String, dynamic>)
           : const AchievementCondition(type: 'none', value: 0),
@@ -313,6 +317,7 @@ class AchievementDef {
     'description': description,
     'icon': icon,
     'xp_reward': xpReward,
+    'coin_reward': coinReward,
     'condition': condition.toJson(),
     if (type != null) 'type': type,
     'category': category,
