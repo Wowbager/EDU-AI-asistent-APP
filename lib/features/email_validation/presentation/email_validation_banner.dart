@@ -4,13 +4,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/providers/core_providers.dart';
 import '../../../core/strings/app_strings.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../data/repositories/oauth_repository.dart';
 import 'email_verification_dialog.dart';
 
 /// Banner shown at the top of MainScreen when user's email is not validated.
 /// Shows different message for guest users (no email) vs registered users (unverified email).
 /// Tapping it opens the verification dialog (if online) or shows a SnackBar (if offline).
 class EmailValidationBanner extends ConsumerWidget {
-  const EmailValidationBanner({super.key});
+  /// Forwarded to the dialog so it can offer SSO alongside the email code
+  /// (BR-79QSEV). Null hides the SSO section.
+  final ValueChanged<OAuthExchangeResult>? onOAuthSuccess;
+
+  const EmailValidationBanner({super.key, this.onOAuthSuccess});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -72,7 +77,10 @@ class EmailValidationBanner extends ConsumerWidget {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => EmailVerificationDialog(email: email),
+      builder: (context) => EmailVerificationDialog(
+        email: email,
+        onOAuthSuccess: onOAuthSuccess,
+      ),
     );
   }
 }

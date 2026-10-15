@@ -62,10 +62,28 @@ class BookmarkNotifier extends StateNotifier<Map<String, ContentBlock>> {
     state = {...state, key: block};
     _dbBookmarkKeys.add(key);
 
-    // Persist to DB.
-    if (_userId != null) {
+    // Persist to DB. _userId may still be null right after a fresh PIN login
+    // (initForUser runs on main-screen init, BEFORE the guest user exists) —
+    // fall back to the active user from the DB so the bookmark and its FSRS
+    // card aren't silently dropped.
+    _persistBookmark(courseId, block, lessonId);
+  }
+
+  Future<void> _persistBookmark(
+      String courseId, ContentBlock block, String lessonId) async {
+    try {
+      if (_userId == null) {
+        final user = await _db.getActiveUser();
+        if (user == null) {
+          silentLog('bookmark_provider:add',
+              'no active user — bookmark for ${block.blockId} not persisted');
+          return;
+        }
+        _userId = user.id;
+      }
+
       final bookmarkId = _uuid.v4();
-      _db.addBookmark(BookmarksTableCompanion(
+      await _db.addBookmark(BookmarksTableCompanion(
         id: Value(bookmarkId),
         userId: Value(_userId!),
         courseId: Value(courseId),
@@ -74,7 +92,7 @@ class BookmarkNotifier extends StateNotifier<Map<String, ContentBlock>> {
       ));
 
       // Enqueue for server sync
-      _syncQueue.enqueue(
+      await _syncQueue.enqueue(
         tableName: 'bookmarks',
         recordId: bookmarkId,
         operation: SyncOperation.create,
@@ -86,23 +104,24 @@ class BookmarkNotifier extends StateNotifier<Map<String, ContentBlock>> {
       );
 
       // Seed an FSRS practice card for this block (sourceType 'bookmark').
-      // Fire-and-forget — no-op if a card already exists, reactivates an
-      // inactive one. Covers manual bookmarks and auto-bookmark-on-wrong.
-      PracticeRepository(db: _db)
-          .createCardFromBlock(
-            userId: _userId!,
-            courseId: courseId,
-            lessonId: lessonId,
-            block: block,
-            sourceType: 'bookmark',
-          )
-          // Refresh the practice queue/count once the card is written so the
-          // homepage "Procvičování" card appears without a manual refresh.
-          .then((_) => _ref.invalidate(practiceQueueProvider))
-          .catchError((Object e, StackTrace st) {
-        silentLog('bookmark_provider:seed_card', e, st);
-        return null;
-      });
+      // No-op if a card already exists, reactivates an inactive one. Covers
+      // manual bookmarks and auto-bookmark-on-wrong.
+      await PracticeRepository(db: _db).createCardFromBlock(
+        userId: _userId!,
+        courseId: courseId,
+        lessonId: lessonId,
+        block: block,
+        sourceType: 'bookmark',
+      );
+      // Refresh the practice queue/count once the card is written so the
+      // homepage "Procvičování" card appears without a manual refresh.
+      _ref.invalidate(practiceQueueProvider);
+      // The picker reads the card rows itself, so it doesn't cascade from the
+      // queue — without this a bookmark in a new lesson never reached it, and
+      // a picker hidden for having one area stayed hidden (BR-27AEMT).
+      _ref.invalidate(practiceScopeProvider);
+    } catch (e, st) {
+      silentLog('bookmark_provider:seed_card', e, st);
     }
   }
 
@@ -145,17 +164,35 @@ class BookmarkNotifier extends StateNotifier<Map<String, ContentBlock>> {
         _dbBookmarkKeys.contains(_key(courseId, blockId));
   }
 
-  /// Check if the course has any bookmarks (in DB or in-memory)
-  bool hasBookmarksForCourse(String courseId) {
-    final prefix = '$courseId:';
-    return _dbBookmarkKeys.any((k) => k.startsWith(prefix)) ||
-        state.keys.any((k) => k.startsWith(prefix));
+  /// Key prefixes to match a course by. A bookmark row may be keyed by the
+  /// local Drift course row id (`local-<uuid>`, what in-app bookmarking passes)
+  /// or by the server course code (`A34-Funkce_c1_v3`, what the server returns
+  /// and what a *different* device's row id can never match). Callers pass both
+  /// so a course's bookmarks are found under either scheme (BR-ZBJ99Z).
+  List<String> _prefixes(String courseId, Iterable<String> alsoMatch) {
+    final ids = <String>{courseId, ...alsoMatch}..removeWhere((c) => c.isEmpty);
+    return ids.map((c) => '$c:').toList();
   }
 
-  /// Get all bookmarked blocks for a course
-  List<ContentBlock> getBookmarksForCourse(String courseId) {
+  /// Check if the course has any bookmarks (in DB or in-memory)
+  bool hasBookmarksForCourse(String courseId,
+      {Iterable<String> alsoMatch = const []}) {
+    final prefixes = _prefixes(courseId, alsoMatch);
+    bool matches(String k) => prefixes.any(k.startsWith);
+    return _dbBookmarkKeys.any(matches) || state.keys.any(matches);
+  }
+
+  /// Get all bookmarked blocks for a course.
+  ///
+  /// Reads the in-memory [state], which only holds blocks that were hydrated
+  /// (see [hydrateForCourse]) — a DB bookmark whose ContentBlock hasn't been
+  /// resolved yet is invisible here. Use [hasBookmarksForCourse] when you only
+  /// need to know whether bookmarks exist.
+  List<ContentBlock> getBookmarksForCourse(String courseId,
+      {Iterable<String> alsoMatch = const []}) {
+    final prefixes = _prefixes(courseId, alsoMatch);
     return state.entries
-        .where((e) => e.key.startsWith('$courseId:'))
+        .where((e) => prefixes.any(e.key.startsWith))
         .map((e) => e.value)
         .toList();
   }
@@ -177,9 +214,10 @@ class BookmarkNotifier extends StateNotifier<Map<String, ContentBlock>> {
   /// Handles both block-level bookmarks (key = courseId:blockId) and
   /// step-level bookmarks (key = courseId:blockId:stepId) by finding
   /// the base block and extracting the specific step's content.
-  void hydrateForCourse(String courseId, List<ContentBlock> allBlocks) {
+  void hydrateForCourse(String courseId, List<ContentBlock> allBlocks,
+      {Iterable<String> alsoMatch = const []}) {
     final newEntries = <String, ContentBlock>{};
-    final prefix = '$courseId:';
+    final prefixes = _prefixes(courseId, alsoMatch);
 
     // Build blockId → ContentBlock lookup
     final blockMap = <String, ContentBlock>{};
@@ -188,7 +226,11 @@ class BookmarkNotifier extends StateNotifier<Map<String, ContentBlock>> {
     }
 
     for (final dbKey in _dbBookmarkKeys) {
-      if (!dbKey.startsWith(prefix)) continue;
+      final prefix = prefixes.firstWhere(
+        dbKey.startsWith,
+        orElse: () => '',
+      );
+      if (prefix.isEmpty) continue;
 
       // Skip if already hydrated in state (user added during this session)
       if (state.containsKey(dbKey)) {

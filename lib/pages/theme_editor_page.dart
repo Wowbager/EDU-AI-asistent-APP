@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../core/theme/app_theme.dart';
 import '../core/strings/app_strings.dart';
 import '../widgets/color_picker_dialog.dart';
+import '../core/layout/breakpoints.dart';
 
 /// Visual theme editor – shows all color keys grouped by category.
 ///
@@ -214,7 +215,12 @@ class _ThemeEditorPageState extends State<ThemeEditorPage> {
   // ── Build ─────────────────────────────────────────────────────────
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ContentWidth(maxWidth: ContentWidth.reading, child: _buildPage(context));
+
+  /// This page has no wide layout yet, so [ContentWidth] keeps it at phone
+  /// width instead of stretching it across a monitor.
+  Widget _buildPage(BuildContext context) {
     return PopScope(
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) _revert();

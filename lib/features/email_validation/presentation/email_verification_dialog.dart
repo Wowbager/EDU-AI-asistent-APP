@@ -2,19 +2,34 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/oauth/oauth_sign_in_buttons.dart';
+import '../../../core/providers/core_providers.dart';
 import '../../../core/strings/app_strings.dart';
+import '../../../core/strings/locale_manager.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../data/repositories/consent_repository.dart';
+import '../../../data/repositories/oauth_repository.dart';
+import '../../../pages/consent/age_gate_route.dart';
+import '../../../pages/consent/consent_request_page.dart';
 import '../providers/email_validation_providers.dart';
 
 /// Dialog for email verification with support for two flows:
 /// 1. Guest users (email is empty): Enter email → Send code → Enter PIN → Verify
 /// 2. Registered users (email exists): Show email → Send code → Enter PIN → Verify
+///
+/// Both flows also offer SSO, so the banner's "sign up for full access" prompt
+/// reaches the same providers as the auth screen (BR-79QSEV).
 class EmailVerificationDialog extends ConsumerStatefulWidget {
   final String email;
+
+  /// Called when the user signed in through a social provider instead of the
+  /// email code. Null hides the SSO section (no one to hand the session to).
+  final ValueChanged<OAuthExchangeResult>? onOAuthSuccess;
 
   const EmailVerificationDialog({
     super.key,
     required this.email,
+    this.onOAuthSuccess,
   });
 
   @override
@@ -32,6 +47,10 @@ class _EmailVerificationDialogState extends ConsumerState<EmailVerificationDialo
 
   late bool _isGuest;
   late String _activeEmail;
+
+  /// Failure from the SSO exchange, rendered inline. A SnackBar would come up
+  /// behind this dialog's modal barrier.
+  String? _ssoError;
 
   @override
   void initState() {
@@ -103,9 +122,76 @@ class _EmailVerificationDialogState extends ConsumerState<EmailVerificationDialo
     _focusNodes[0].requestFocus();
   }
 
-  void _handleSendCode() {
+  Future<void> _handleSendCode() async {
     _activeEmail = _emailController.text.trim();
-    ref.read(emailVerificationProvider.notifier).sendCode(_activeEmail);
+    final notifier = ref.read(emailVerificationProvider.notifier);
+    // Same rule as the auth screen: an unknown e-mail is a registration and
+    // meets the age gate before a code goes anywhere (BR-J2WJEQ).
+    if (!await notifier.screenNewAccount(
+          _activeEmail,
+          onNewAccount: _ageGateBeforeRegistration,
+        ) ||
+        !mounted) {
+      return;
+    }
+    notifier.sendCode(_activeEmail);
+  }
+
+  /// The gate is passed again here only as the fallback for when
+  /// [_handleSendCode]'s account check could not reach the server; the
+  /// notifier skips it for an e-mail that was already asked about.
+  void _verifyCode() {
+    ref
+        .read(emailVerificationProvider.notifier)
+        .verifyCode(_pin, onNewAccount: _ageGateBeforeRegistration);
+  }
+
+  /// The age gate for an account this dialog is about to create — an unknown
+  /// e-mail, or a provider credential with no account behind it. Returns
+  /// whether the registration may proceed.
+  ///
+  /// This dialog registers guests too, and used to do it without ever asking,
+  /// by e-mail or by provider. A minor is handed to the guardian consent flow
+  /// the same way MainScreen's login route does it: the child types the code
+  /// their parent receives on the normal PIN screen.
+  Future<bool> _ageGateBeforeRegistration() async {
+    // Captured up front: a minor's answer closes this dialog, after which
+    // neither its context nor its ref may be touched.
+    final navigator = Navigator.of(context);
+    final consentRepository = ref.read(consentRepositoryProvider);
+    final guestLogin = ref.read(requestGuestLoginProvider.notifier);
+
+    final result = await showAgeGate(context);
+    if (!mounted) return false;
+
+    switch (result.outcome) {
+      case AgeGateOutcome.oldEnough:
+        return true;
+      case AgeGateOutcome.needsConsent:
+        final country = result.country;
+        ref.read(emailVerificationProvider.notifier).reset();
+        navigator.pop();
+        navigator.push(
+          MaterialPageRoute(
+            builder: (_) => ConsentRequestPage(
+              country: country,
+              onSubmit: (email) => consentRepository.requestConsent(
+                email: email,
+                locale: LocaleManager.current.code,
+                country: country,
+              ),
+              onEnterCode: () {
+                navigator.pop();
+                guestLogin.state++;
+              },
+              onBack: () => navigator.pop(),
+            ),
+          ),
+        );
+        return false;
+      case AgeGateOutcome.dismissed:
+        return false;
+    }
   }
 
   @override
@@ -146,59 +232,65 @@ class _EmailVerificationDialogState extends ConsumerState<EmailVerificationDialo
       ),
       child: Container(
         padding: const EdgeInsets.all(24),
-        constraints: const BoxConstraints(maxWidth: 400),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Header
-            Row(
-              children: [
-                Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: AppColors.bannerOrange16,
-                    shape: BoxShape.circle,
+        // 400 content + 2×24 padding: room for the GIS-rendered Google button
+        // at its full 400px on web (it shrinks to fit anything narrower).
+        constraints: const BoxConstraints(maxWidth: 448),
+        // With the SSO block added, the initial step can outgrow a short
+        // viewport (small phone, or any phone with the keyboard up).
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Header
+              Row(
+                children: [
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: AppColors.bannerOrange16,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.person_add_outlined,
+                      color: AppColors.bannerOrangeDark,
+                      size: 24,
+                    ),
                   ),
-                  child: Icon(
-                    Icons.person_add_outlined,
-                    color: AppColors.bannerOrangeDark,
-                    size: 24,
+                  const Spacer(),
+                  IconButton(
+                    onPressed: () {
+                      ref.read(emailVerificationProvider.notifier).reset();
+                      Navigator.of(context).pop();
+                    },
+                    icon: const Icon(Icons.close),
+                    color: AppColors.primaryDark48,
                   ),
-                ),
-                const Spacer(),
-                IconButton(
-                  onPressed: () {
-                    ref.read(emailVerificationProvider.notifier).reset();
-                    Navigator.of(context).pop();
-                  },
-                  icon: const Icon(Icons.close),
-                  color: AppColors.primaryDark48,
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-
-            // Title
-            Text(
-              _isGuest ? AppStrings.dialogRegistration : AppStrings.dialogEmailVerification,
-              style: AppTextStyles.heading3(),
-            ),
-            const SizedBox(height: 8),
-
-            // Subtitle — only show email for non-guests when not in initial state
-            if (!_isGuest && state is! EmailVerificationInitial)
-              Text(
-                _activeEmail,
-                style: AppTextStyles.bodySmall(color: AppColors.primaryDark64),
+                ],
               ),
-            if (!_isGuest && state is! EmailVerificationInitial)
-              const SizedBox(height: 24),
+              const SizedBox(height: 16),
 
-            // Content based on state
-            _buildContent(state),
-          ],
+              // Title
+              Text(
+                _isGuest ? AppStrings.dialogRegistration : AppStrings.dialogEmailVerification,
+                style: AppTextStyles.heading3(),
+              ),
+              const SizedBox(height: 8),
+
+              // Subtitle — only show email for non-guests when not in initial state
+              if (!_isGuest && state is! EmailVerificationInitial)
+                Text(
+                  _activeEmail,
+                  style: AppTextStyles.bodySmall(color: AppColors.primaryDark64),
+                ),
+              if (!_isGuest && state is! EmailVerificationInitial)
+                const SizedBox(height: 24),
+
+              // Content based on state
+              _buildContent(state),
+            ],
+          ),
         ),
       ),
     );
@@ -206,9 +298,16 @@ class _EmailVerificationDialogState extends ConsumerState<EmailVerificationDialo
 
   Widget _buildContent(EmailVerificationState state) {
     return switch (state) {
-      EmailVerificationInitial() => _isGuest
-          ? _buildEmailInputStep()
-          : _buildSendCodeStep(),
+      // SSO rides along with the initial step only — once a code is in flight
+      // the user has committed to the email path.
+      EmailVerificationInitial() => Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _isGuest ? _buildEmailInputStep() : _buildSendCodeStep(),
+            if (widget.onOAuthSuccess != null) _buildSsoStep(),
+          ],
+        ),
       EmailVerificationLoading(:final message) => _buildLoadingStep(message),
       EmailVerificationCodeSent() => _buildEnterCodeStep(),
       EmailVerificationError(:final type, :final message) => _buildErrorStep(type, message),
@@ -289,6 +388,76 @@ class _EmailVerificationDialogState extends ConsumerState<EmailVerificationDialo
     );
   }
 
+  /// "Nebo" divider + the social sign-in buttons, mirroring the auth screen.
+  Widget _buildSsoStep() {
+    // The mode the *running* session was issued with — not
+    // SessionMeta.pendingSharedDevice, whose `true` default would make the
+    // backend skip absorbGuest and orphan this guest's courses (BR-79QSEV).
+    final sharedDevice = ref.read(sessionMetaProvider).sharedDevice;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 24),
+        Row(
+          children: [
+            Expanded(
+              child: Container(height: 1, color: AppColors.primaryDark12),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text(
+                AppStrings.authOrCzech,
+                style: AppTextStyles.bodySmall(color: AppColors.primaryDark48),
+              ),
+            ),
+            Expanded(
+              child: Container(height: 1, color: AppColors.primaryDark12),
+            ),
+          ],
+        ),
+        const SizedBox(height: 24),
+        if (_ssoError != null) ...[
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.error08,
+              borderRadius: AppDecorations.radiusS,
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.error_outline, color: AppColors.error, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _ssoError!,
+                    style: AppTextStyles.bodySmall(color: AppColors.error),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+        ],
+        OAuthSignInButtons(
+          sharedDevice: sharedDevice,
+          // Read off the session, not chosen here — must not overwrite the
+          // preference the user states when logging in fresh.
+          persistSharedPreference: false,
+          beforeExchange: _ageGateBeforeRegistration,
+          onError: (message) {
+            if (mounted) setState(() => _ssoError = message);
+          },
+          onSuccess: (exchange) {
+            Navigator.of(context).pop();
+            widget.onOAuthSuccess?.call(exchange);
+          },
+        ),
+      ],
+    );
+  }
+
   Widget _buildSendCodeStep() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -307,9 +476,7 @@ class _EmailVerificationDialogState extends ConsumerState<EmailVerificationDialo
           width: double.infinity,
           height: 56,
           child: ElevatedButton(
-            onPressed: () {
-              ref.read(emailVerificationProvider.notifier).sendCode(_activeEmail);
-            },
+            onPressed: _handleSendCode,
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.primaryDark,
               foregroundColor: Colors.white,
@@ -416,7 +583,7 @@ class _EmailVerificationDialogState extends ConsumerState<EmailVerificationDialo
           child: ElevatedButton(
             onPressed: _pin.length == 6
                 ? () {
-                    ref.read(emailVerificationProvider.notifier).verifyCode(_pin);
+                    _verifyCode();
                   }
                 : null,
             style: ElevatedButton.styleFrom(
@@ -557,7 +724,7 @@ class _EmailVerificationDialogState extends ConsumerState<EmailVerificationDialo
             child: ElevatedButton(
               onPressed: _pin.length == 6
                   ? () {
-                      ref.read(emailVerificationProvider.notifier).verifyCode(_pin);
+                      _verifyCode();
                     }
                   : null,
               style: ElevatedButton.styleFrom(

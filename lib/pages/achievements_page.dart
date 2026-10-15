@@ -4,8 +4,10 @@ import '../core/theme/app_theme.dart';
 import '../core/strings/app_strings.dart';
 import '../models/gamification_config_model.dart';
 import '../models/skill_display_model.dart';
+import '../widgets/detail_shell.dart';
 import '../widgets/page_header.dart';
 import '../widgets/skill_card.dart';
+import '../core/layout/breakpoints.dart';
 
 /// Achievements page displaying user progress, trophies, goals and challenges.
 ///
@@ -18,6 +20,9 @@ class AchievementsPage extends StatefulWidget {
   final int totalXp;
   final int streakDays;
   final int trophiesCount;
+
+  /// Lifetime EDUX coins the student has earned (BR-HK9828).
+  final int coinsEarned;
   final int lessonsCompleted;
   final int coursesCompleted;
   final int quizzesCompleted;
@@ -43,6 +48,7 @@ class AchievementsPage extends StatefulWidget {
     this.totalXp = 0,
     this.streakDays = 1,
     this.trophiesCount = 0,
+    this.coinsEarned = 0,
     this.lessonsCompleted = 0,
     this.coursesCompleted = 0,
     this.quizzesCompleted = 0,
@@ -70,6 +76,7 @@ class _AchievementsPageState extends State<AchievementsPage> {
   int get totalXp => widget.totalXp;
   int get streakDays => widget.streakDays;
   int get trophiesCount => widget.trophiesCount;
+  int get coinsEarned => widget.coinsEarned;
   int get lessonsCompleted => widget.lessonsCompleted;
   int get coursesCompleted => widget.coursesCompleted;
   int get quizzesCompleted => widget.quizzesCompleted;
@@ -97,45 +104,70 @@ class _AchievementsPageState extends State<AchievementsPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (context.widthClass == WidthClass.compact) {
+      return _buildPage(context, showHeader: true);
+    }
+
+    // Pushed above the shell on a wide viewport, so it redraws the navigation
+    // itself — otherwise the page loses the sidebar the rest of the app has
+    // (BR-5JSXBV). Titled rather than given a "back to …" link: it is opened
+    // from the profile, the dashboard and a course detail alike, so there is no
+    // single place "back" could name.
+    return DetailShell(
+      title: AppStrings.achievementsTitle,
+      child: _buildPage(context, showHeader: false),
+    );
+  }
+
+  /// [showHeader] is off beside the sidebar, where `DetailShell`'s top bar
+  /// already carries the title.
+  Widget _buildPage(BuildContext context, {required bool showHeader}) {
     return Scaffold(
       backgroundColor: AppColors.primary,
       body: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Purple header section (scrolls with content)
-            _buildHeader(context),
-            // White content section
-            Container(
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(24),
-                  topRight: Radius.circular(24),
+        // The clamp sits inside the scaffold, not around it: the purple band
+        // and the white sheet are the page's background and have to run the
+        // full width of the content pane, while the content on them stays at a
+        // readable measure.
+        child: ContentWidth(
+          maxWidth: ContentWidth.reading,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Purple header section (scrolls with content)
+              _buildHeader(context, showHeader: showHeader),
+              // White content section
+              Container(
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(24),
+                    topRight: Radius.circular(24),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 32),
+                    // Trophies section
+                    _buildTrophiesSection(),
+                    const SizedBox(height: 32),
+                    // Goals section
+                    _buildGoalsSection(),
+                    const SizedBox(height: 32),
+                    // Challenges section
+                    if (_hasChallenges) ...[
+                      _buildChallengesSection(),
+                      const SizedBox(height: 32),
+                    ],
+                    // Skills section
+                    _buildSkillsSection(key: _skillsSectionKey),
+                    const SizedBox(height: 40),
+                  ],
                 ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 32),
-                  // Trophies section
-                  _buildTrophiesSection(),
-                  const SizedBox(height: 32),
-                  // Goals section
-                  _buildGoalsSection(),
-                  const SizedBox(height: 32),
-                  // Challenges section
-                  if (_hasChallenges) ...[
-                    _buildChallengesSection(),
-                    const SizedBox(height: 32),
-                  ],
-                  // Skills section
-                  _buildSkillsSection(key: _skillsSectionKey),
-                  const SizedBox(height: 40),
-                ],
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -143,7 +175,7 @@ class _AchievementsPageState extends State<AchievementsPage> {
 
   bool get _hasChallenges => _config.challenges.isNotEmpty;
 
-  Widget _buildHeader(BuildContext context) {
+  Widget _buildHeader(BuildContext context, {required bool showHeader}) {
     final xpRemaining = xpForNextLevel - currentXp;
 
     return SafeArea(
@@ -153,102 +185,74 @@ class _AchievementsPageState extends State<AchievementsPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            PageHeader(
-              title: AppStrings.achievementsTitle,
-              titleStyle: AppTextStyles.heading2Bold(color: Colors.white),
-              padding: EdgeInsets.zero,
-            ),
-            const SizedBox(height: 16),
-            // XP Progress card (orange)
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: AppColors.orange,
-                borderRadius: AppDecorations.radiusXL,
+            if (showHeader) ...[
+              PageHeader(
+                title: AppStrings.achievementsTitle,
+                titleStyle: AppTextStyles.heading2Bold(color: Colors.white),
+                padding: EdgeInsets.zero,
               ),
-              child: Column(
-                children: [
-                  // Level info row
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        AppStrings.achievementsLvl(level),
-                        style: AppTextStyles.statValue(color: Colors.white),
-                      ),
-                      Text(
-                        AppStrings.achievementsXpRemaining(xpRemaining, level + 1),
-                        style: AppTextStyles.meta(
-                          color: Colors.white.withValues(alpha: 0.8),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  // XP progress bar (white)
-                  _buildXpProgressBar(),
-                ],
+              const SizedBox(height: 16),
+            ],
+            // Level beside Streak, Trophies beside EDUX coins (BR-HK9828).
+            // Four cards of one shape rather than a full-width XP banner: the
+            // banner's "progress bar" only ever drew the number, so nothing is
+            // lost by giving it the same box as the rest.
+            _buildStatRow([
+              _buildStatCard(
+                label: AppStrings.achievementsLvl(level),
+                caption: AppStrings.achievementsXpRemaining(xpRemaining, level + 1),
+                value:
+                    '${_formatNumber(currentXp)} / ${_formatNumber(xpForNextLevel)} XP',
+                icon: Icons.bolt,
+                backgroundColor: AppColors.orange,
+                labelColor: Colors.white,
               ),
-            ),
+              _buildStatCard(
+                label: AppStrings.profileStatStreak,
+                value: AppStrings.achievementsDaysCount(streakDays),
+                icon: Icons.local_fire_department,
+                backgroundColor: AppColors.cardYellow,
+                labelColor: AppColors.primaryDark,
+              ),
+            ]),
             const SizedBox(height: 12),
-            // Stats row (Streak and Trofeje)
-            Row(
-              children: [
-                Expanded(
-                  child: _buildStatCard(
-                    label: AppStrings.profileStatStreak,
-                    value: AppStrings.achievementsDaysCount(streakDays),
-                    icon: Icons.local_fire_department,
-                    backgroundColor: AppColors.cardYellow,
-                    labelColor: AppColors.primaryDark,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _buildStatCard(
-                    label: AppStrings.achievementsTrophies,
-                    value: trophiesCount.toString(),
-                    icon: Icons.emoji_events,
-                    backgroundColor: AppColors.cardYellow,
-                    labelColor: AppColors.primaryDark,
-                  ),
-                ),
-              ],
-            ),
+            _buildStatRow([
+              _buildStatCard(
+                label: AppStrings.achievementsTrophies,
+                value: trophiesCount.toString(),
+                icon: Icons.emoji_events,
+                backgroundColor: AppColors.cardYellow,
+                labelColor: AppColors.primaryDark,
+              ),
+              _buildStatCard(
+                label: AppStrings.achievementsCoins,
+                value: _formatNumber(coinsEarned),
+                icon: Icons.monetization_on,
+                backgroundColor: AppColors.cardYellow,
+                labelColor: AppColors.primaryDark,
+              ),
+            ]),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildXpProgressBar() {
-    return Container(
-      height: 48,
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: AppDecorations.radiusM,
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Row(
-          children: [
-            // Lightning bolt icon with gradient
-            ShaderMask(
-              shaderCallback: (bounds) =>
-                  AppColors.xpGradient.createShader(bounds),
-              child: const Icon(
-                Icons.bolt,
-                color: Colors.white,
-                size: 24,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              '${_formatNumber(currentXp)} / ${_formatNumber(xpForNextLevel)} XP',
-              style: AppTextStyles.statValue(),
-            ),
+  /// One row of the stat grid.
+  ///
+  /// [IntrinsicHeight] is what keeps the pair level: the Lvl card carries a
+  /// caption line the others do not, and without it the yellow card beside it
+  /// would end short of the orange one's bottom edge.
+  Widget _buildStatRow(List<Widget> cards) {
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var i = 0; i < cards.length; i++) ...[
+            if (i > 0) const SizedBox(width: 12),
+            Expanded(child: cards[i]),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -259,6 +263,7 @@ class _AchievementsPageState extends State<AchievementsPage> {
     required IconData icon,
     required Color backgroundColor,
     required Color labelColor,
+    String? caption,
   }) {
     return Container(
       padding: const EdgeInsets.all(16),
@@ -274,6 +279,15 @@ class _AchievementsPageState extends State<AchievementsPage> {
             label,
             style: AppTextStyles.statValue(color: labelColor),
           ),
+          if (caption != null) ...[
+            const SizedBox(height: 2),
+            Text(
+              caption,
+              style: AppTextStyles.meta(
+                color: labelColor.withValues(alpha: 0.8),
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           // White inner card with icon and value
           Container(
@@ -295,9 +309,18 @@ class _AchievementsPageState extends State<AchievementsPage> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                Text(
-                  value,
-                  style: AppTextStyles.cardTitleSmall(),
+                // Half the width the banner had, and "1,250 / 1,500 XP" is the
+                // longest string any of these cards can hold — scaling down is
+                // what keeps it off the overflow stripes on a narrow phone.
+                Expanded(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      value,
+                      style: AppTextStyles.cardTitleSmall(),
+                    ),
+                  ),
                 ),
               ],
             ),

@@ -4,6 +4,7 @@
 // answer state, progress data, and the go_to resolver.
 
 import 'block_model.dart';
+import 'open_answer_feedback.dart';
 
 /// Export mode determines quiz/exercise behavior.
 enum ExportMode {
@@ -22,6 +23,43 @@ class StepAnswerState {
   final String? markValue;   // Czech grade "1"-"5" from option.mark (quiz mode)
   final double? scoreKoef;   // option.score_koef for the selected answer
 
+  // AI grading of open answers (BR-FFVVYR). Absent when the answer was graded
+  // locally — offline, on timeout, or when the question opted out of AI.
+  final bool evaluatedByAi;
+  final String? aiFeedback;
+  final String? aiModel;
+
+  // ─── Formative feedback + photo answers (BR-P745Q8) ───────────────────────
+
+  /// The three-part feedback the student was shown. Null on a locally graded
+  /// answer, and on an attempt whose evaluation failed.
+  final FormativeFeedback? feedback;
+
+  /// Handle of the photographed answer, as issued by the upload endpoint.
+  /// Kept in the answer state so a reload restores the attachment, not just
+  /// the typed text.
+  final String? photoName;
+
+  /// True when AI evaluation was attempted and did not produce feedback.
+  ///
+  /// This is what stops a failed evaluation from being dressed up as a verdict:
+  /// the student is shown a retry, and the attempt is logged as failed rather
+  /// than silently falling back to a string comparison that would call any
+  /// paragraph-length answer wrong.
+  final bool evaluationFailed;
+
+  /// How many times this step has been submitted and graded.
+  ///
+  /// Drives AI-guided solving (BR-V9TQA7), which withholds the authored
+  /// explanation until the attempts run out. It is persisted with the rest of
+  /// the answer because a reload that reset it to zero would hand the student
+  /// a fresh set of attempts — and, since the reveal is the thing being
+  /// rationed, an unlimited supply of them.
+  ///
+  /// Counts graded submissions only: an evaluation that never produced a
+  /// verdict (offline, timeout) does not spend an attempt.
+  final int attemptCount;
+
   const StepAnswerState({
     this.selectedOptionId,
     this.selectedOptionIds,
@@ -30,6 +68,13 @@ class StepAnswerState {
     this.isCorrect,
     this.markValue,
     this.scoreKoef,
+    this.evaluatedByAi = false,
+    this.aiFeedback,
+    this.aiModel,
+    this.feedback,
+    this.photoName,
+    this.evaluationFailed = false,
+    this.attemptCount = 0,
   });
 
   Map<String, dynamic> toJson() => {
@@ -40,6 +85,13 @@ class StepAnswerState {
     if (isCorrect != null) 'isCorrect': isCorrect,
     if (markValue != null) 'markValue': markValue,
     if (scoreKoef != null) 'scoreKoef': scoreKoef,
+    if (evaluatedByAi) 'evaluatedByAi': true,
+    if (aiFeedback != null) 'aiFeedback': aiFeedback,
+    if (aiModel != null) 'aiModel': aiModel,
+    if (feedback != null) 'feedback': feedback!.toJson(),
+    if (photoName != null) 'photoName': photoName,
+    if (evaluationFailed) 'evaluationFailed': true,
+    if (attemptCount > 0) 'attemptCount': attemptCount,
   };
 
   factory StepAnswerState.fromJson(Map<String, dynamic> json) {
@@ -53,6 +105,13 @@ class StepAnswerState {
       isCorrect: json['isCorrect'] as bool?,
       markValue: json['markValue'] as String?,
       scoreKoef: (json['scoreKoef'] as num?)?.toDouble(),
+      evaluatedByAi: json['evaluatedByAi'] as bool? ?? false,
+      aiFeedback: json['aiFeedback'] as String?,
+      aiModel: json['aiModel'] as String?,
+      feedback: FormativeFeedback.fromJson(json['feedback']),
+      photoName: json['photoName'] as String?,
+      evaluationFailed: json['evaluationFailed'] as bool? ?? false,
+      attemptCount: (json['attemptCount'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -64,6 +123,22 @@ class StepAnswerState {
     bool? isCorrect,
     String? markValue,
     double? scoreKoef,
+    bool? evaluatedByAi,
+    String? aiFeedback,
+    String? aiModel,
+    FormativeFeedback? feedback,
+    String? photoName,
+    bool? evaluationFailed,
+    int? attemptCount,
+    // `copyWith` cannot null a field out through the usual `?? this.x` idiom,
+    // and detaching a photo has to be expressible — a student who retakes a
+    // blurry shot must be able to remove the old one.
+    bool clearPhoto = false,
+    bool clearFeedback = false,
+    // Same for the legacy flat feedback. Without it a re-graded answer whose
+    // new response carries no text inherits the previous attempt's, dressed up
+    // as the verdict on the answer the student just wrote (BR-K8TDU4).
+    bool clearAiFeedback = false,
   }) {
     return StepAnswerState(
       selectedOptionId: selectedOptionId ?? this.selectedOptionId,
@@ -73,6 +148,15 @@ class StepAnswerState {
       isCorrect: isCorrect ?? this.isCorrect,
       markValue: markValue ?? this.markValue,
       scoreKoef: scoreKoef ?? this.scoreKoef,
+      evaluatedByAi: evaluatedByAi ?? this.evaluatedByAi,
+      aiFeedback: clearAiFeedback ? null : (aiFeedback ?? this.aiFeedback),
+      aiModel: aiModel ?? this.aiModel,
+      feedback: clearFeedback ? null : (feedback ?? this.feedback),
+      photoName: clearPhoto ? null : (photoName ?? this.photoName),
+      evaluationFailed: evaluationFailed ?? this.evaluationFailed,
+      // Never reset by a plain copyWith: reopening an attempt clears the
+      // feedback but must not refund the attempt that produced it.
+      attemptCount: attemptCount ?? this.attemptCount,
     );
   }
 }

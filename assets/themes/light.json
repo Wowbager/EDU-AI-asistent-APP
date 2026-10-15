@@ -1,0 +1,42 @@
+{
+  "name": "Light",
+  "version": 1,
+  "colors": {
+    "primary": "#B7ACF0",
+    "primaryDark": "#4A4458",
+    "background": "#FAFAFE",
+    "gradientPurple": "#A99EE0",
+    "authGradientTop": "#A99EE0",
+    "authGradientBottom": "#7C71B8",
+    "surface": "#FFFFFF",
+
+    "success": "#2FBE87",
+    "orange": "#FF7128",
+    "warning": "#FF9800",
+    "error": "#E53935",
+    "errorLight": "#FF6B6B",
+
+    "surfaceLight": "#F1EFF8",
+    "progressTrack": "#E8E6F2",
+    "progressFill": "#B7ACF0",
+    "quizPurple": "#8B7FE0",
+    "inputBg": "#F2F0FA",
+    "infoBg": "#F8F7FD",
+    "disabled": "#9B97A8",
+    "disabledButton": "#CFCCDA",
+    "progressBorder": "#A79FD0",
+
+    "successBg": "#E8F5E9",
+    "errorBg": "#FFEBEE",
+    "hintBg": "#FFF8E1",
+    "hintBorder": "#FFD54F",
+    "hintIconColor": "#FFA000",
+    "orangeBg": "#FBE9E7",
+    "successBgLight": "#E8F5E9",
+    "videoDark": "#2E2A3E",
+    "hintIcon": "#FFE082",
+    "gradientGold": "#FFD54F",
+    "navScrimTop": "#8D86AC",
+    "navScrimBottom": "#3F3956"
+  }
+}

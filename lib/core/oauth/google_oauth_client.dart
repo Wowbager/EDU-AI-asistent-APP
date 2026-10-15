@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:google_sign_in/google_sign_in.dart';
+import '../util/silent_log.dart';
 import 'oauth_payload.dart';
 import 'oauth_provider.dart';
 
@@ -43,7 +44,12 @@ class GoogleOAuthClient {
         scopeHint: const ['openid', 'email', 'profile'],
       );
       return _toResult(account);
-    } on GoogleSignInException catch (e) {
+    } on GoogleSignInException catch (e, st) {
+      // Android maps a Google Cloud misconfiguration (missing Android-type
+      // OAuth client for this package+SHA-1) to `canceled` too — Credential
+      // Manager dismisses its sheet after the account pick. Log it so the
+      // "picked account, nothing happened" reports carry the real code.
+      silentLog('google_oauth', e, st);
       if (e.code == GoogleSignInExceptionCode.canceled) return null;
       rethrow;
     }

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../core/theme/app_theme.dart';
 import '../core/strings/app_strings.dart';
 import 'theme_editor_page.dart';
+import '../core/layout/breakpoints.dart';
 
 /// Available theme definition — loaded from assets or custom storage.
 class _ThemeOption {
@@ -51,6 +52,9 @@ class _ThemeSelectorPageState extends State<ThemeSelectorPage> {
       'assets/themes/default.json',
       'assets/themes/ocean.json',
       'assets/themes/sunset.json',
+      'assets/themes/fire.json',
+      'assets/themes/light.json',
+      'assets/themes/neutral.json',
     ];
 
     final builtIn = <_ThemeOption>[];
@@ -258,7 +262,12 @@ class _ThemeSelectorPageState extends State<ThemeSelectorPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ContentWidth(maxWidth: ContentWidth.reading, child: _buildPage(context));
+
+  /// This page has no wide layout yet, so [ContentWidth] keeps it at phone
+  /// width instead of stretching it across a monitor.
+  Widget _buildPage(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
@@ -496,6 +505,12 @@ class _ThemeSelectorPageState extends State<ThemeSelectorPage> {
         return AppStrings.themeOcean;
       case 'Sunset':
         return AppStrings.themeSunset;
+      case 'Fire':
+        return AppStrings.themeFire;
+      case 'Light':
+        return AppStrings.themeLight;
+      case 'Neutral':
+        return AppStrings.themeNeutral;
       default:
         return AppStrings.themeCustom;
     }

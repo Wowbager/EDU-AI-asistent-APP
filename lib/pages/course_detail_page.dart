@@ -1,11 +1,19 @@
+import 'dart:async' show unawaited;
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import '../core/media/lesson_image_cache.dart';
 import '../core/theme/app_theme.dart';
 import '../core/strings/app_strings.dart';
 import '../models/course_model.dart';
+import '../models/skill_display_model.dart';
 import '../widgets/card_carousel.dart';
 import '../widgets/course_card.dart';
+import '../widgets/course_cover_image.dart';
+import '../widgets/detail_shell.dart';
+import '../widgets/progress_ring_card.dart';
 import '../core/providers/core_providers.dart';
 import '../core/providers/bookmark_provider.dart';
 import '../data/repositories/user_course_repository.dart';
@@ -13,8 +21,19 @@ import '../main.dart' show routeObserver, countAchievementStats;
 import 'lesson_detail_page.dart';
 import 'exercise_page.dart';
 import 'quiz_page.dart';
+import 'course_quiz_launch.dart';
 import 'achievements_page.dart';
+import 'chat_detail_page.dart';
+import '../models/chat_models.dart';
 import 'package:eduai/core/util/silent_log.dart';
+import '../core/layout/breakpoints.dart';
+import '../core/util/shell_route.dart';
+
+/// The wide hero's action row — the course actions plus "Uložit kurz" — and
+/// the action group inside it. Named so the layout tests can measure where the
+/// two landed (BR-BCNXAP).
+const Key courseHeroActionsKey = Key('course-hero-actions');
+const Key courseHeroActionButtonsKey = Key('course-hero-action-buttons');
 
 /// Course Detail Page displaying full course information
 class CourseDetailPage extends ConsumerStatefulWidget {
@@ -55,6 +74,18 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
   bool _hasUpdate = false;
   bool _isUpdating = false;
 
+  /// Selected tab of the wide layout: lessons / about / skills / stats.
+  int _wideTab = 0;
+
+  /// Width of the course page's right-hand rail.
+  static const double _railWidth = 340;
+
+  /// Wide hero geometry: padding around the card, the icon tile, and the gap
+  /// between the tile and the text column.
+  static const double _heroPadding = 24;
+  static const double _heroIconSize = 160;
+  static const double _heroIconGap = 24;
+
   Course get _course => _courseOverride ?? widget.course;
 
   /// Best-known userCourseId — from widget or discovered at runtime.
@@ -63,11 +94,61 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
   /// Whether the initial quiz is required and not yet completed.
   bool get _quizRequired => _course.startsWithQuiz && !_quizCompleted;
 
+  /// A finished only-once course (typically a test) stays closed. The code
+  /// input refuses it, but every other way here — a published test sits in
+  /// Knihovna — used to offer "Začít kvíz" again and record a second attempt
+  /// (BR-Y4WMCU), so the page itself has to say no.
+  bool get _onlyOnceLocked => _course.onlyOnce && _course.isCompleted;
+
+  /// Course unlocks every lesson at once — no sequential gate, and no single
+  /// "current" lesson to badge (BR-K47WYE). A pending update or a required
+  /// entry quiz still locks everything; those are different reasons to lock.
+  bool get _openAll => _course.openAllLessons;
+
   /// Whether this is a quiz-only course (no lessons shown).
   bool get _isOnlyQuiz => _course.onlyQuiz;
 
   /// Label for the quiz button based on current state.
   String get _quizButtonLabel => _quizStarted ? AppStrings.courseContinueQuiz : AppStrings.courseStartQuiz;
+
+  /// Course ids this course's bookmarks may be stored under: the local Drift
+  /// row id and the server course code. They differ — and the code is the one
+  /// the server (and therefore another device) uses (BR-ZBJ99Z).
+  List<String> get _courseIdAliases =>
+      [_course.id, if (_course.courseCode != null) _course.courseCode!];
+
+  /// Whether the DB holds any bookmark for this course, regardless of whether
+  /// its ContentBlock has been hydrated into the notifier yet.
+  bool _hasBookmarks() => ref
+      .read(bookmarkProvider.notifier)
+      .hasBookmarksForCourse(_course.id, alsoMatch: _courseIdAliases);
+
+  /// Blocks the "Cvičení" session plays: completed default_practice blocks
+  /// plus the course's bookmarked blocks.
+  List<ContentBlock> _exerciseBlocks() => _course.getExerciseBlocks(
+        ref.read(bookmarkProvider.notifier).getBookmarksForCourse(
+              _course.id,
+              alsoMatch: _courseIdAliases,
+            ),
+        completedBlockIds: _completedBlockIds,
+        removedBlockIds: _removedPracticeBlocks,
+      );
+
+  /// Resolve this course's DB bookmarks to real ContentBlocks.
+  ///
+  /// Bookmarks are loaded as bare keys on login; only [hydrateForCourse] turns
+  /// them into blocks, and it used to run exclusively from the lesson page. A
+  /// course opened straight from the dashboard therefore looked bookmark-free
+  /// and hid its "Cvičení" button (BR-ZBJ99Z).
+  void _hydrateBookmarks() {
+    final blocks = _course.getAllBlocks();
+    if (blocks.isEmpty) return;
+    ref.read(bookmarkProvider.notifier).hydrateForCourse(
+          _course.id,
+          blocks,
+          alsoMatch: _courseIdAliases,
+        );
+  }
 
   /// Lessons that actually have blocks — skip empty ones.
   List<Lesson> get _nonEmptyLessons {
@@ -84,8 +165,15 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
     _calculateTotalBlocks();
     // Load progress data after init, then check for updates
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Same app-scoped list as the new-chat picker: without a refresh the
+      // course mentor button keeps offering a mentor the admin switched off
+      // until the app is restarted (BR-EER4ME).
+      if (mounted) ref.invalidate(courseChatMentorsProvider(_course.id));
       _refreshCourseProgress().then((_) => _checkForUpdate());
     });
+    // Courses downloaded before BR-BX9AA4 have text but no pictures kept on
+    // the device; opening one online fills them in, so it works offline.
+    unawaited(LessonImageCache.instance.prefetch(_course.imageUrls));
   }
 
   @override
@@ -196,9 +284,14 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
           _removedPracticeBlocks = removedIds;
           _hasUpdate = userCourse!.hasUpdate;
           _calculateTotalBlocks(); // Recalculate in case course data changed
-          _isCourseCompleted = userCourse.status == UserCourseStatus.completed
+          // The rebuilt course, not the stored status: a course completed
+          // before its author added lessons is not done (BR-PHJQDK).
+          _isCourseCompleted = updatedCourse.isCompleted
               || (_completedBlocks >= _totalBlocks && _totalBlocks > 0);
         });
+        // Course JSON is loaded now — turn this course's DB bookmarks into real
+        // blocks so the Cvičení button sees them (BR-ZBJ99Z).
+        _hydrateBookmarks();
       }
     } catch (e, st) { silentLog('course_detail_page', e, st); }
   }
@@ -262,6 +355,10 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
         downloadedVersion: version,
       );
 
+      // Sync so any newly flagged default_practice blocks in the updated
+      // content get seeded into the practice set and pushed right away.
+      ref.read(syncServiceProvider).sync();
+
       // Reload course data + clear _hasUpdate
       await _refreshCourseProgress();
 
@@ -317,7 +414,8 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
     final realIndex = _course.lessons.indexOf(lesson);
     await Navigator.push(
       context,
-      MaterialPageRoute(
+      shellPageRoute(
+        context,
         builder: (context) => LessonDetailPage(
           course: _course,
           lesson: lesson,
@@ -335,6 +433,16 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
 
   @override
   Widget build(BuildContext context) {
+    if (context.widthClass == WidthClass.compact) return _buildPage(context);
+    // Always a pushed route, so it has to redraw the navigation itself.
+    return DetailShell(
+      backLabel: AppStrings.courseBackToAll,
+      child: _buildWidePage(context),
+    );
+  }
+
+  /// Phone layout — unchanged.
+  Widget _buildPage(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
       body: Stack(
@@ -388,6 +496,8 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
                       children: [
                         // Lessons section
                         _buildLessonsSection(),
+                        // Skills card
+                        _buildSkillsSection(),
                         // Quizzes section
                         _buildQuizzesSection(),
                         // Bottom padding for action bar
@@ -548,6 +658,7 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
                     ],
                   ),
                 ),
+                _buildCourseMentorButton(),
                 _buildSkillsButton(),
               ],
             ),
@@ -598,6 +709,124 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
     );
   }
 
+  /// Entry point to this course's own mentors.
+  ///
+  /// Course mentors are usually hidden — they are deliberately kept out of the
+  /// general new-chat list, so this button is the only way a student reaches
+  /// them. It renders nothing when the course has no mentors, so courses that
+  /// never got one look exactly as before.
+  Widget _buildCourseMentorButton() {
+    return Consumer(
+      builder: (context, ref, _) {
+        final mentors =
+            ref.watch(courseChatMentorsProvider(_course.id)).valueOrNull ??
+                const <ChatMentor>[];
+
+        if (mentors.isEmpty) return const SizedBox.shrink();
+
+        return Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: GestureDetector(
+            onTap: () => _openCourseMentor(mentors),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: AppColors.primaryDark,
+                borderRadius: AppDecorations.radiusS,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    mentors.length == 1 ? mentors.first.emoji : '\u{1F4AC}',
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    mentors.length == 1
+                        ? mentors.first.name
+                        : AppStrings.courseMentor,
+                    style: AppTextStyles.badgeSmall(color: AppColors.surface),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// One mentor opens straight into a chat; several first ask which one.
+  Future<void> _openCourseMentor(List<ChatMentor> mentors) async {
+    if (mentors.length == 1) {
+      await _startMentorChat(mentors.first);
+      return;
+    }
+
+    final picked = await showModalBottomSheet<ChatMentor>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 24, 24, 40),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(AppStrings.chatSelectPersona, style: AppTextStyles.cardTitle()),
+            const SizedBox(height: 16),
+            ...mentors.map(
+              (m) => ListTile(
+                leading: Text(m.emoji, style: const TextStyle(fontSize: 24)),
+                title: Text(m.name, style: AppTextStyles.labelMedium()),
+                subtitle: m.subtitle == null
+                    ? null
+                    : Text(m.subtitle!, style: AppTextStyles.meta()),
+                onTap: () => Navigator.pop(ctx, m),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (picked != null) await _startMentorChat(picked);
+  }
+
+  Future<void> _startMentorChat(ChatMentor mentor) async {
+    try {
+      final user = await ref.read(activeUserProvider.future);
+      if (user == null) return;
+
+      final session = await ref
+          .read(chatRepositoryProvider)
+          .createSession(user.id, mentor.slug);
+
+      if (!mounted) return;
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ChatDetailPage(
+            sessionId: session.id,
+            sessionTitle:
+                session.title.isNotEmpty ? session.title : mentor.name,
+            persona: mentor.persona,
+          ),
+        ),
+      );
+    } catch (e, st) {
+      silentLog('course_detail_page', e, st);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(AppStrings.chatRequiresInternet),
+          backgroundColor: Colors.red.shade700,
+        ),
+      );
+    }
+  }
+
   Widget _buildSkillsButton() {
     return GestureDetector(
       onTap: _navigateToSkills,
@@ -640,7 +869,8 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
 
     if (!mounted) return;
     Navigator.of(context).push(
-      MaterialPageRoute(
+      shellPageRoute(
+        context,
         builder: (_) => AchievementsPage(
           level: stats?.level ?? 1,
           currentXp: stats?.xpForCurrentLevel ?? 0,
@@ -648,6 +878,7 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
           totalXp: stats?.xpPoints ?? 0,
           streakDays: stats?.streakDays ?? 1,
           trophiesCount: stats?.achievementsCount ?? 0,
+          coinsEarned: stats?.coinsEarned ?? 0,
           lessonsCompleted: counts.lessons,
           coursesCompleted: counts.courses,
           quizzesCompleted: counts.quizzes,
@@ -977,15 +1208,20 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
   Widget _buildLessonCard(Lesson lesson, int index) {
     Color iconBgColor;
     String iconPath;
+    // Null keeps the asset's own colours: the lock is drawn near-black, which
+    // no palette key matches.
+    Color? iconColor;
 
     switch (lesson.status) {
       case LessonStatus.completed:
         iconBgColor = AppColors.successBg;
         iconPath = 'assets/icons/check.svg';
+        iconColor = AppColors.success;
         break;
       case LessonStatus.inProgress:
         iconBgColor = AppColors.background;
         iconPath = 'assets/icons/play.svg';
+        iconColor = AppColors.progressFill;
         break;
       case LessonStatus.locked:
         iconBgColor = AppColors.background;
@@ -997,10 +1233,13 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
     if (_quizRequired || _hasUpdate) {
       iconBgColor = AppColors.background;
       iconPath = 'assets/icons/lock.svg';
+      iconColor = null;
     }
 
-    final isInProgress = !_quizRequired && !_hasUpdate && lesson.status == LessonStatus.inProgress;
-    final isLocked = _quizRequired || _hasUpdate || lesson.status == LessonStatus.locked;
+    final isInProgress = !_quizRequired && !_hasUpdate && !_openAll &&
+        lesson.status == LessonStatus.inProgress;
+    final isLocked = _quizRequired || _hasUpdate ||
+        (!_openAll && lesson.status == LessonStatus.locked);
 
     return GestureDetector(
       onTap: isLocked ? null : () => _navigateToLesson(lesson),
@@ -1026,6 +1265,9 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
                 iconPath,
                 width: 24,
                 height: 24,
+                colorFilter: iconColor == null
+                    ? null
+                    : ColorFilter.mode(iconColor, BlendMode.srcIn),
               ),
             ),
           ),
@@ -1165,15 +1407,47 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
           ),
         ],
       ),
-      child: _hasUpdate
-          ? _buildUpdateBanner()
-          : _isOnlyQuiz
-              ? _buildQuizRequiredActionButton()
-              : _quizRequired
-                  ? _buildQuizRequiredActionButton()
-                  : _isCourseCompleted
-                      ? _buildCompletedActionButtons()
-                      : _buildInProgressActionButtons(),
+      child: _actionContent(),
+    );
+  }
+
+  /// The primary action for the course's current state.
+  ///
+  /// Shared by the phone layout's bottom bar and the wide layout's hero card
+  /// so the two cannot disagree about what "continue" means when an update is
+  /// pending or an entry quiz is required.
+  Widget _actionContent() {
+    if (_onlyOnceLocked) return _buildOnlyOnceLockedNotice();
+    if (_hasUpdate) return _buildUpdateBanner();
+    if (_isOnlyQuiz || _quizRequired) return _buildQuizRequiredActionButton();
+    if (_isCourseCompleted) return _buildCompletedActionButtons();
+    return _buildInProgressActionButtons();
+  }
+
+  /// Takes the place of every action once an only-once course is finished.
+  Widget _buildOnlyOnceLockedNotice() {
+    return Container(
+      width: double.infinity,
+      height: 56,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: AppColors.success.withValues(alpha: 0.16),
+        borderRadius: AppDecorations.radiusM,
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.check_circle_rounded, color: AppColors.success, size: 22),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              AppStrings.libraryCourseAlreadyCompleted,
+              textAlign: TextAlign.center,
+              style: AppTextStyles.statValue(color: AppColors.success),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1220,12 +1494,10 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
 
   /// Action buttons when course is in progress: Cviceni + Pokracovat v lekci
   Widget _buildInProgressActionButtons() {
-    final bookmarkNotifier = ref.read(bookmarkProvider.notifier);
-    final hasExerciseBlocks = _course.getExerciseBlocks(
-      bookmarkNotifier.getBookmarksForCourse(_course.id),
-      completedBlockIds: _completedBlockIds,
-      removedBlockIds: _removedPracticeBlocks,
-    ).isNotEmpty;
+    // Watch (not read) so the row rebuilds once _hydrateBookmarks fills the
+    // notifier's in-memory blocks.
+    ref.watch(bookmarkProvider);
+    final hasExerciseBlocks = _exerciseBlocks().isNotEmpty || _hasBookmarks();
     final hasQuestions = _course.getAllQuestionBlocks().isNotEmpty;
 
     final continueButton = GestureDetector(
@@ -1335,12 +1607,8 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
 
   /// Action buttons when course is completed: Cviceni (bookmarked + default_practice) + Kviz (all questions)
   Widget _buildCompletedActionButtons() {
-    final bookmarkNotifier = ref.read(bookmarkProvider.notifier);
-    final hasExerciseBlocks = _course.getExerciseBlocks(
-      bookmarkNotifier.getBookmarksForCourse(_course.id),
-      completedBlockIds: _completedBlockIds,
-      removedBlockIds: _removedPracticeBlocks,
-    ).isNotEmpty;
+    ref.watch(bookmarkProvider);
+    final hasExerciseBlocks = _exerciseBlocks().isNotEmpty || _hasBookmarks();
     final hasQuestions = _course.getAllQuestionBlocks().isNotEmpty;
 
     // If neither exercise blocks nor questions exist, show "Pokračovat" to re-enter lessons
@@ -1523,12 +1791,11 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
 
   /// Navigate to exercise based on default_practice + bookmarked blocks
   Future<void> _navigateToExercise() async {
-    final bookmarkNotifier = ref.read(bookmarkProvider.notifier);
-    final exerciseBlocks = _course.getExerciseBlocks(
-      bookmarkNotifier.getBookmarksForCourse(_course.id),
-      completedBlockIds: _completedBlockIds,
-      removedBlockIds: _removedPracticeBlocks,
-    );
+    // Bookmarks may still be un-hydrated when the user taps straight through
+    // from the dashboard — resolve them now so a course whose only exercise
+    // material is bookmarked doesn't report "no bookmarks" (BR-ZBJ99Z).
+    _hydrateBookmarks();
+    final exerciseBlocks = _exerciseBlocks();
 
     if (exerciseBlocks.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1576,10 +1843,15 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
     }
   }
 
-  /// Navigate to quiz based on all question blocks from the course
+  /// Navigate to the course quiz — ten ELO-matched questions like the global
+  /// quiz, or every question where the quiz is the assessment (BR-WRMW7W);
+  /// see [courseQuizBlocks].
   Future<void> _navigateToQuiz() async {
-    // Get all question blocks from the course
-    final questionBlocks = _course.getAllQuestionBlocks();
+    // No button leads here for a finished only-once course; refuse anyway.
+    if (_onlyOnceLocked) return;
+
+    final questionBlocks = await courseQuizBlocks(ref, _course, _quizProgress);
+    if (!mounted) return;
 
     if (questionBlocks.isEmpty) {
       // Show message if no questions available
@@ -1645,6 +1917,683 @@ class _CourseDetailPageState extends ConsumerState<CourseDetailPage> with RouteA
     if (mounted) {
       await _refreshCourseProgress();
     }
+  }
+
+  // ── Wide layout ───────────────────────────────────────────────────────
+  //
+  // Same data as the phone page, arranged per the desktop design: a hero card,
+  // a tabbed content card, and a rail carrying progress and skills.
+  // The phone builders above are untouched.
+
+  Widget _buildWidePage(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const pad = 32.0;
+        final contentWidth = constraints.maxWidth - pad * 2;
+        final withRail = hasSideRail(contentWidth);
+
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(pad, 8, pad, 40),
+          children: [
+            _buildWideHero(),
+            const SizedBox(height: 24),
+            if (withRail)
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: _buildWideTabsCard()),
+                  const SizedBox(width: 24),
+                  SizedBox(
+                    width: _railWidth,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: _buildWideRail(),
+                    ),
+                  ),
+                ],
+              )
+            else ...[
+              _buildWideTabsCard(),
+              const SizedBox(height: 24),
+              ..._buildWideRail(),
+            ],
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildWideHero() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // What the card's content may use, and what is left for the text
+        // column once the icon tile and the gap after it are taken out.
+        final inner = constraints.maxWidth - _heroPadding * 2;
+        final infoWidth = inner - _heroIconSize - _heroIconGap;
+        // On tablet widths the text column is too narrow to hold the action
+        // buttons next to "Uložit kurz": the three of them split what was left
+        // until their labels ran over each other (BR-BCNXAP). Below that width
+        // the row drops under the icon and takes the hero's full width.
+        final stackActions = !heroActionRowFits(infoWidth);
+
+        return Container(
+          padding: const EdgeInsets.all(_heroPadding),
+          decoration: BoxDecoration(
+            color: _course.iconBackgroundColor.withValues(alpha: 0.32),
+            borderRadius: AppDecorations.radiusXL,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // The design has a per-course illustration: the course cover
+                  // when admin set one, otherwise the emoji blown up on a
+                  // tinted tile (BR-YKYXC6).
+                  Container(
+                    width: _heroIconSize,
+                    height: _heroIconSize,
+                    clipBehavior: Clip.antiAlias,
+                    decoration: BoxDecoration(
+                      color: AppColors.surface.withValues(alpha: 0.72),
+                      borderRadius: AppDecorations.radiusL,
+                    ),
+                    child: CourseCoverImage(
+                      url: _course.headerImage?.url,
+                      fallback: Center(
+                        child: Text(_course.iconEmoji,
+                            style: const TextStyle(fontSize: 84)),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: _heroIconGap),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Flexible(
+                              child: Text(
+                                _course.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: AppTextStyles.heading2Bold(),
+                              ),
+                            ),
+                            if (_course.badge.isNotEmpty) ...[
+                              const SizedBox(width: 12),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 6),
+                                decoration: BoxDecoration(
+                                  color:
+                                      AppColors.primary.withValues(alpha: 0.16),
+                                  borderRadius: AppDecorations.radiusPill,
+                                ),
+                                child: Text(
+                                  _course.badge,
+                                  style: AppTextStyles.badgeSmall(
+                                      color: AppColors.primary),
+                                ),
+                              ),
+                            ],
+                            if (_isCourseCompleted) ...[
+                              const SizedBox(width: 8),
+                              _buildCompletedBadge(),
+                            ],
+                          ],
+                        ),
+                        if (_course.description.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            _course.description,
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTextStyles.body(
+                                color: AppColors.primaryDark72),
+                          ),
+                        ],
+                        const SizedBox(height: 16),
+                        Wrap(
+                          spacing: 20,
+                          runSpacing: 8,
+                          children: [
+                            _heroMeta(Icons.copy_rounded,
+                                AppStrings.lessonsCount(_course.lessonCount)),
+                            _heroMeta(
+                                Icons.access_time,
+                                AppStrings.durationSmart(
+                                    _course.durationMinutes)),
+                            if (_course.difficulty.isNotEmpty)
+                              _heroMeta(
+                                  Icons.bar_chart_rounded,
+                                  AppStrings.courseLevelLabel(
+                                      _course.difficulty)),
+                          ],
+                        ),
+                        if (!stackActions) ...[
+                          const SizedBox(height: 20),
+                          _buildHeroActions(infoWidth),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              if (stackActions) ...[
+                const SizedBox(height: 20),
+                _buildHeroActions(inner),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// The hero's action row: the shared course actions plus "Uložit kurz".
+  ///
+  /// [availableWidth] is what the row may occupy. When both do not fit on one
+  /// line the save button drops to a line of its own rather than squeezing the
+  /// action buttons past the width their labels need.
+  Widget _buildHeroActions(double availableWidth) {
+    final besideSave = heroActionRowFits(availableWidth);
+    final actionsWidth = math.min(
+      besideSave
+          ? availableWidth - kHeroActionsGap - kHeroSaveButtonWidth
+          : availableWidth,
+      kHeroActionsMaxWidth,
+    );
+
+    return Wrap(
+      key: courseHeroActionsKey,
+      spacing: kHeroActionsGap,
+      runSpacing: kHeroActionsGap,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        // Reuses the phone bottom bar's chooser so update / quiz-required /
+        // completed states behave identically.
+        SizedBox(
+          key: courseHeroActionButtonsKey,
+          width: actionsWidth,
+          child: _actionContent(),
+        ),
+        _buildSaveCourseButton(),
+      ],
+    );
+  }
+
+  Widget _heroMeta(IconData icon, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 16, color: AppColors.primaryDark48),
+        const SizedBox(width: 6),
+        Text(label,
+            style: AppTextStyles.meta(color: AppColors.primaryDark64)),
+      ],
+    );
+  }
+
+  /// Placeholder: bookmarking a whole course is not wired up (the list cards
+  /// hide their bookmark control for the same reason).
+  Widget _buildSaveCourseButton() {
+    return GestureDetector(
+      onTap: () => ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${AppStrings.courseSaveButton} — ${AppStrings.profileComingSoon}',
+          ),
+        ),
+      ),
+      child: Container(
+        height: 56,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: AppDecorations.radiusM,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.bookmark_border_rounded,
+                size: 20, color: AppColors.primaryDark),
+            const SizedBox(width: 8),
+            Text(AppStrings.courseSaveButton,
+                style: AppTextStyles.actionSmall()),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWideTabsCard() {
+    final tabs = [
+      AppStrings.courseTabLessons,
+      AppStrings.courseTabAbout,
+      AppStrings.courseTabSkills,
+      AppStrings.courseTabStats,
+    ];
+
+    return Container(
+      decoration: AppDecorations.cardDecorationLight,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(
+              children: [
+                for (var i = 0; i < tabs.length; i++)
+                  _buildTab(tabs[i], i),
+              ],
+            ),
+          ),
+          Divider(height: 1, color: AppColors.primaryDark08),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: switch (_wideTab) {
+              1 => _buildWideAbout(),
+              2 => _buildSkillsList(limit: null),
+              3 => _buildWidePlaceholder(AppStrings.courseStatsPlaceholder),
+              _ => _buildWideLessons(),
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTab(String label, int index) {
+    final isSelected = _wideTab == index;
+    return InkWell(
+      onTap: () => setState(() => _wideTab = index),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(
+              width: 2,
+              color: isSelected ? AppColors.primary : Colors.transparent,
+            ),
+          ),
+        ),
+        child: Text(
+          label,
+          style: AppTextStyles.actionSmall(
+            color: isSelected ? AppColors.primary : AppColors.primaryDark64,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWidePlaceholder(String message) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 32),
+      child: Center(
+        child: Text(
+          message,
+          textAlign: TextAlign.center,
+          style: AppTextStyles.body(color: AppColors.primaryDark64),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWideAbout() {
+    if (_course.description.isEmpty) {
+      return _buildWidePlaceholder(AppStrings.courseDescription);
+    }
+    return Text(
+      _course.description,
+      style: AppTextStyles.body(color: AppColors.primaryDark72, height: 1.6),
+    );
+  }
+
+  Widget _buildWideLessons() {
+    if (_isOnlyQuiz) return _buildWidePlaceholder(AppStrings.courseQuizzes);
+
+    final lessons = _nonEmptyLessons;
+    if (lessons.isEmpty) return _buildCorruptedCourseNotice();
+
+    // Every lesson, like the phone list. The design folded all but the first
+    // five behind a "show all" toggle, which on a desktop only hid lessons
+    // there was room for (BR-M2EZY6).
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_hasUpdate) ...[
+          _buildWideNotice(AppStrings.courseUpdateRequired),
+          const SizedBox(height: 12),
+        ],
+        if (_quizRequired) ...[
+          _buildStartQuizCard(),
+          const SizedBox(height: 12),
+        ],
+        for (var i = 0; i < lessons.length; i++) ...[
+          _buildWideLessonRow(lessons[i], i),
+          if (i < lessons.length - 1) const SizedBox(height: 8),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildWideNotice(String message) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withValues(alpha: 0.10),
+        borderRadius: AppDecorations.radiusM,
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.32)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.info_outline_rounded, color: AppColors.warning, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(message,
+                style: AppTextStyles.bodySmall(color: AppColors.warning)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWideLessonRow(Lesson lesson, int index) {
+    // Same gating as the phone card: a pending update or a required entry quiz
+    // locks everything.
+    final isLocked = _quizRequired || _hasUpdate ||
+        (!_openAll && lesson.status == LessonStatus.locked);
+    final isCurrent = !isLocked && !_openAll &&
+        lesson.status == LessonStatus.inProgress;
+    final isDone = lesson.status == LessonStatus.completed;
+
+    final Color numberBg = isCurrent
+        ? AppColors.primary
+        : isDone
+            ? AppColors.successBg
+            : AppColors.background;
+    final Color numberFg = isCurrent ? AppColors.surface : AppColors.primaryDark;
+
+    return GestureDetector(
+      onTap: isLocked ? null : () => _navigateToLesson(lesson),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: isCurrent
+              ? AppColors.primary.withValues(alpha: 0.06)
+              : AppColors.background,
+          borderRadius: AppDecorations.radiusL,
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(color: numberBg, shape: BoxShape.circle),
+              child: Center(
+                child: isDone
+                    ? Icon(Icons.check, size: 20, color: AppColors.success)
+                    : Text('${index + 1}',
+                        style: AppTextStyles.actionSmall(color: numberFg)),
+              ),
+            ),
+            const SizedBox(width: 16),
+            // The title takes two thirds of what the fixed columns leave and
+            // wraps onto a second line; one line cut longer titles off
+            // (BR-M2EZY6).
+            Expanded(
+              flex: 2,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    lesson.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTextStyles.bodySemiBold(),
+                  ),
+                  if (lesson.subtitle.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      lesson.subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTextStyles.bodySmall(
+                          color: AppColors.primaryDark64),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 16),
+            // Expanded, not Flexible: a loose meta left its unused share as dead
+            // space after the action button instead of handing it to the title,
+            // and its right alignment did nothing. On a narrow tablet column the
+            // meta still trims rather than overflowing the row.
+            Expanded(
+              child: Text(
+                '${AppStrings.courseQuestionsCount(lesson.questionCount)} · '
+                '${AppStrings.courseDurationMin(lesson.durationMinutes)}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.right,
+                style: AppTextStyles.meta(color: AppColors.primaryDark64),
+              ),
+            ),
+            const SizedBox(width: 16),
+            SizedBox(width: 132, child: _buildLessonAction(lesson, isLocked, isCurrent)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLessonAction(Lesson lesson, bool isLocked, bool isCurrent) {
+    if (isLocked) {
+      return Container(
+        height: 40,
+        decoration: BoxDecoration(
+          borderRadius: AppDecorations.radiusM,
+          border: Border.all(color: AppColors.primaryDark12),
+        ),
+        child: Icon(Icons.lock_outline,
+            size: 18, color: AppColors.primaryDark48),
+      );
+    }
+
+    return GestureDetector(
+      onTap: () => _navigateToLesson(lesson),
+      child: Container(
+        height: 40,
+        decoration: BoxDecoration(
+          color: isCurrent ? AppColors.primary : null,
+          borderRadius: AppDecorations.radiusM,
+          border:
+              isCurrent ? null : Border.all(color: AppColors.primaryDark12),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.play_arrow_rounded,
+              size: 18,
+              color: isCurrent ? AppColors.surface : AppColors.primaryDark,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              isCurrent
+                  ? AppStrings.courseCardContinue
+                  : AppStrings.courseOpenLesson,
+              style: AppTextStyles.actionSmall(
+                color: isCurrent ? AppColors.surface : AppColors.primaryDark,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _buildWideRail() {
+    final lessons = _nonEmptyLessons;
+    final done = lessons.where((l) => l.status == LessonStatus.completed).length;
+
+    return [
+      ProgressRingCard(
+        lessonsDone: _isCourseCompleted ? lessons.length : done,
+        lessonsTotal: lessons.length,
+        hintOverride:
+            _isCourseCompleted ? null : AppStrings.courseTrophyHint,
+        showBar: true,
+        trailingIcon: Icons.emoji_events_outlined,
+        actionLabel: AppStrings.courseDetailedStats,
+        onDetailTap: _navigateToSkills,
+      ),
+      const SizedBox(height: 16),
+      _buildSkillsCard(),
+    ];
+  }
+
+  /// Phone placement of [_buildSkillsCard], under the lesson list.
+  ///
+  /// The wide layout carries the card in its rail, which the phone column has
+  /// no equivalent of, so it gets its own padded slot matching the surrounding
+  /// sections. Hidden outright when the learner has no ELO profile yet — the
+  /// provider returns an empty list only in that case, so an untouched account
+  /// doesn't grow an explanatory panel it can't act on.
+  Widget _buildSkillsSection() {
+    final skills = ref.watch(skillDisplayProvider).valueOrNull ?? const [];
+    if (skills.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 32, 16, 0),
+      child: _buildSkillsCard(),
+    );
+  }
+
+  Widget _buildSkillsCard() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: AppDecorations.cardDecorationLight,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(AppStrings.courseSkillsInCourse,
+                    style: AppTextStyles.heading4()),
+              ),
+              GestureDetector(
+                onTap: _navigateToSkills,
+                behavior: HitTestBehavior.opaque,
+                child: Text(
+                  AppStrings.courseShowAll,
+                  style: AppTextStyles.actionSmall(color: AppColors.primary),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _buildSkillsList(limit: 3),
+        ],
+      ),
+    );
+  }
+
+  /// Skill rows.
+  ///
+  /// These are the learner's overall ELO-derived skills, not per-course ones —
+  /// the model has no course scoping for them. Shown as-is rather than faked.
+  Widget _buildSkillsList({required int? limit}) {
+    final skills = ref.watch(skillDisplayProvider).valueOrNull ?? const [];
+    if (skills.isEmpty) {
+      return Text(
+        AppStrings.courseSkillsEmpty,
+        style: AppTextStyles.bodySmall(color: AppColors.primaryDark64),
+      );
+    }
+
+    final shown = limit == null ? skills : skills.take(limit).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var i = 0; i < shown.length; i++) ...[
+          _buildSkillRow(shown[i]),
+          if (i < shown.length - 1) const SizedBox(height: 16),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildSkillRow(SkillDisplay skill) {
+    // SkillDisplay.level is 0 (no data) or 1–10.
+    final fraction = (skill.level / 10).clamp(0.0, 1.0);
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: AppColors.primary.withValues(alpha: 0.12),
+            shape: BoxShape.circle,
+          ),
+          child: Center(
+            child: Text(skill.emoji, style: const TextStyle(fontSize: 18)),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                skill.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppTextStyles.bodySemiBold(),
+              ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: fraction,
+                        minHeight: 6,
+                        backgroundColor: AppColors.progressTrack,
+                        valueColor:
+                            AlwaysStoppedAnimation(AppColors.progressFill),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    AppStrings.skillLevelLabel(skill.level.round()),
+                    style: AppTextStyles.meta(color: AppColors.primaryDark64),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 }
 

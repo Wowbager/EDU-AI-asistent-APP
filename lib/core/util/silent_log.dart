@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 /// Once an error reporter is wired in, route through it here in one place.
 void silentLog(String tag, Object error, [StackTrace? stack]) {
   if (kReleaseMode) return;
+  debugPrint('SILENTLOG[$tag] $error');
   developer.log(
     error.toString(),
     name: 'silent.$tag',

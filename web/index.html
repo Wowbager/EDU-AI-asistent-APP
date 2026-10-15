@@ -25,6 +25,20 @@
   <title>EDU-AI asistent</title>
   <link rel="manifest" href="manifest.json">
 
+  <!-- Fix double placeholder on web: Flutter draws InputDecoration.hintText into
+       the canvas, and on focus the engine also mirrors that hint onto the native
+       <input>/<textarea> placeholder (for autofill hinting). The browser renders
+       that native placeholder in its own font, so two mismatched placeholders show
+       at once. The editing elements live in the light DOM under <flt-text-editing-host>,
+       so hide only their native placeholder — the canvas hint stays, and the
+       placeholder attribute remains for autofill/assistive tech. -->
+  <style>
+    flt-text-editing-host input::placeholder,
+    flt-text-editing-host textarea::placeholder {
+      color: transparent !important;
+    }
+  </style>
+
   <!-- Microsoft (aad_oauth) web support: MSAL.js + the plugin's JS interop.
        msalv2.js defines the global `aadOauth` the Dart web plugin calls.
        Without these, MS sign-in throws `ReferenceError: aadOauth is not defined`. -->

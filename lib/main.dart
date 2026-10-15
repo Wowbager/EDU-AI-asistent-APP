@@ -9,6 +9,7 @@ import 'core/services/auth_token_storage.dart';
 import 'core/strings/locale_manager.dart';
 import 'core/theme/app_theme.dart';
 import 'core/util/silent_log.dart';
+import 'widgets/themed_svg.dart';
 
 // Re-exports for backward compatibility — existing pages import these from
 // 'package:eduai/main.dart'.
@@ -28,6 +29,9 @@ Future<void> _restoreSavedTheme() async {
     'Default': 'assets/themes/default.json',
     'Ocean': 'assets/themes/ocean.json',
     'Sunset': 'assets/themes/sunset.json',
+    'Fire': 'assets/themes/fire.json',
+    'Light': 'assets/themes/light.json',
+    'Neutral': 'assets/themes/neutral.json',
   };
   if (builtIn.containsKey(name)) {
     try {
@@ -70,6 +74,10 @@ void main() async {
 
   // Restore previously selected theme.
   await _restoreSavedTheme();
+
+  // Read the multi-colour brand SVGs up front so they can be recoloured
+  // synchronously when the palette changes (BR-A6TZZX).
+  await ThemedSvg.precache();
 
   // Restore previously selected locale (defaults to Czech).
   await LocaleManager.restore();

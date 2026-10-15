@@ -19,10 +19,16 @@ RUN flutter build web --release \
     --dart-define=MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID} \
     --dart-define=MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID}
 
-# Cache-busting: append build timestamp to JS URLs so CDN caches are bypassed
+# Cache-busting: append build timestamp to JS URLs so CDN caches are bypassed.
+# The brand icons get the same stamp: they were served "immutable" for a year
+# until BR-EK9P6J, so correcting the header alone leaves every client that
+# already cached the old logo pinned to it until 2027. A fresh URL is a fresh
+# cache key, which is the only thing that reaches those clients.
 RUN BUILD_VER=$(date +%s) && \
     sed -i "s|flutter_bootstrap.js|flutter_bootstrap.js?v=${BUILD_VER}|g" build/web/index.html && \
-    sed -i "s|\"main.dart.js\"|\"main.dart.js?v=${BUILD_VER}\"|g" build/web/flutter_bootstrap.js
+    sed -i "s|\"main.dart.js\"|\"main.dart.js?v=${BUILD_VER}\"|g" build/web/flutter_bootstrap.js && \
+    sed -i -E "s#href=\"(apple-touch-icon\.png|favicon-96x96\.png|favicon\.svg|favicon\.ico|manifest\.json)\"#href=\"\1?v=${BUILD_VER}\"#g" build/web/index.html && \
+    sed -i -E "s#\"(icons/web-app-manifest-[0-9]+x[0-9]+\.png)\"#\"\1?v=${BUILD_VER}\"#g" build/web/manifest.json
 
 # Stage 2: Serve with nginx
 FROM nginx:alpine

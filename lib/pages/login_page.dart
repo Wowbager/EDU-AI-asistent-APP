@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
+import '../core/layout/breakpoints.dart';
+import '../widgets/auth_hero_scaffold.dart';
 
 class LoginPage extends StatefulWidget {
   final VoidCallback onLoginSuccess;
@@ -35,7 +37,12 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ContentWidth(maxWidth: ContentWidth.reading, child: _buildPage(context));
+
+  /// This page has no wide layout yet, so [ContentWidth] keeps it at phone
+  /// width instead of stretching it across a monitor.
+  Widget _buildPage(BuildContext context) {
     final screenHeight = MediaQuery.of(context).size.height;
     final topSectionHeight = screenHeight * 0.35; // Height for logo area
 
@@ -114,10 +121,7 @@ class _LoginPageState extends State<LoginPage> {
                       left: 0,
                       right: 0,
                       child: Center(
-                        child: Image.asset(
-                          'assets/images/login_logo.png',
-                          width: 276,
-                        ),
+                        child: buildAuthWordmark(width: 276),
                       ),
                     ),
                   ],

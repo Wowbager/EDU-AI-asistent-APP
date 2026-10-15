@@ -1,33 +1,50 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' show max;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:uuid/uuid.dart';
 import '../models/course_model.dart';
+import '../core/media/lesson_image_cache.dart';
 import '../core/elo/elo_engine.dart';
+import '../core/elo/gpf_vector_shape.dart';
+import '../core/elo/task_difficulty.dart';
+import '../core/evaluation/ai_answer_evaluator.dart';
+import '../core/evaluation/expected_answer.dart';
+import '../core/evaluation/gaming_filter.dart';
 import '../core/gamification/achievement_evaluator.dart';
+import '../data/repositories/open_answer_repository.dart';
 import '../core/providers/core_providers.dart';
 import '../core/providers/bookmark_provider.dart';
+import '../core/services/work_time_tracker.dart';
 import '../core/providers/practice_providers.dart';
 import '../models/chat_models.dart';
 import 'chat_detail_page.dart';
 import '../core/sync/sync_queue.dart';
 import '../core/theme/app_theme.dart';
 import '../data/repositories/user_course_repository.dart';
+import '../widgets/answer_photo_picker.dart';
 import '../widgets/block_step_engine.dart';
 import '../models/step_navigation.dart';
+import '../core/utils/ai_context_sanitizer.dart';
 import 'quiz_page.dart';
+import 'course_quiz_launch.dart';
 import '../core/strings/app_strings.dart';
 import 'lesson_detail/lesson_header.dart';
 import 'lesson_detail/lesson_nav.dart';
-import 'lesson_detail/hint_sheet.dart';
+import 'lesson_detail/mentor_sheet.dart';
 import 'lesson_detail/card_container.dart';
 import 'lesson_detail/action_button_row.dart';
 import 'lesson_detail/legacy_cards.dart';
 import 'lesson_detail/content_block_cards.dart';
 import 'lesson_detail/atomic_cards.dart';
 import 'package:eduai/core/util/silent_log.dart';
+import '../core/layout/breakpoints.dart';
+import '../widgets/detail_shell.dart';
+import '../widgets/progress_ring_card.dart';
+import '../core/util/shell_route.dart';
 
 /// Lesson Detail Page displaying lesson content blocks
 class LessonDetailPage extends ConsumerStatefulWidget {
@@ -57,12 +74,20 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
   late bool _useContentBlocks;
 
   late ScrollController _scrollController;
+  late final WorkTimeTracker _workTimeTracker;
   late List<GlobalKey> _cardKeys;
   int _currentBlockIndex = 0;
   int _lastRestoredBlockIndex = -1;
 
   // Track if this was the last lesson and course is now completed
   bool _courseCompleted = false;
+
+  /// [widget.course] with lesson statuses updated once this lesson is
+  /// completed (BR-CPX4N9). The rail's progress card and lesson list read it,
+  /// and it is what the next lesson opens with.
+  Course? _courseOverride;
+
+  Course get _course => _courseOverride ?? widget.course;
 
   // Track pending save operations so we can await them before pop
   Future<void>? _pendingSave;
@@ -93,6 +118,33 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
   // TextEditingControllers for free-text quiz inputs (keyed by block index)
   final Map<int, TextEditingController> _textControllers = {};
 
+  // AI grading verdicts for atomic open answers, by block index (BR-FFVVYR).
+  // A missing entry means the answer was graded by local string comparison.
+  final Map<int, AiEvaluationResult> _aiResults = {};
+
+  // Block index currently out for AI grading, or null. Drives the spinner and
+  // guards against a second submission while the call is in flight.
+  int? _evaluatingIndex;
+
+  // ─── Photographed answers + retry (BR-P745Q8), by block index ─────────────
+
+  /// Why the last evaluation produced nothing. Present means the student is
+  /// looking at a retry, and the block stays unanswered.
+  final Map<int, AiEvaluationFailure> _evaluationFailures = {};
+
+  /// Photos picked but not yet uploaded. Kept across a failed evaluation so a
+  /// retry does not make the student take the picture again.
+  final Map<int, PickedAnswerPhoto> _pickedPhotos = {};
+
+  /// Handles issued by the upload endpoint.
+  final Map<int, String> _photoNames = {};
+
+  final Set<int> _uploadingPhotoIndexes = {};
+
+  /// The evaluation asked for a better picture. Distinct from a failure: it
+  /// produced feedback, the photo just could not be read.
+  final Set<int> _unreadablePhotoIndexes = {};
+
   // Step progress for step-based blocks (blockId → StepProgressData)
   final Map<String, StepProgressData> _stepProgress = {};
 
@@ -101,6 +153,11 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
 
   // Tracks blocks that have been answered/evaluated but not yet confirmed (user must tap checkmark)
   final Set<int> _answeredBlocks = {};
+
+  // Debounces the progress save while the user is typing an open-question
+  // answer, so an in-progress draft survives leaving/reloading the lesson
+  // (BR-A7AHKR) without hammering the DB on every keystroke.
+  Timer? _openAnswerSaveDebounce;
 
   // Tracks how many times a block has been reset via cross-block jump.
   // Used as part of the BlockStepEngine key to force State recreation.
@@ -114,6 +171,11 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
 
   // Block-level activity timestamps: blockId → opened_at ISO8601
   final Map<String, String> _blockTimestamps = {};
+
+  // blockId → confirmed_at ISO8601: when the block's answer was submitted.
+  // With opened_at it is the pair the gaming filter reads, live in _updateElo
+  // and later in the admin ELO backfill (BR-3N79C3).
+  final Map<String, String> _blockConfirmedAt = {};
 
   // Tracks hint/help usage per block index for ELO score penalty.
   // 0 = no hint, 1 = hint shown, 2 = help (detailed explanation) shown.
@@ -147,12 +209,21 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
     super.initState();
     _scrollController = ScrollController();
 
-    // Track active work time while this lesson is open (BR-9SAH2R).
-    ref.read(workTimeTrackerProvider).setLocation(
-          courseId: widget.course.id,
-          lessonId: widget.lesson.id,
-          context: 'lesson',
-        );
+    // Track active work time while this lesson is open (BR-9SAH2R). Keep the
+    // tracker instance — dispose() must not touch `ref` (Riverpod throws
+    // "Cannot use ref after the widget was disposed", which used to abort the
+    // rest of dispose).
+    _workTimeTracker = ref.read(workTimeTrackerProvider);
+    _workTimeTracker.setLocation(
+      courseId: widget.course.id,
+      lessonId: widget.lesson.id,
+      context: 'lesson',
+    );
+
+    // Keep the course's pictures on the device while online, so this lesson
+    // and the ones not opened yet still have them offline (BR-BX9AA4). The
+    // dashboard opens lessons without passing through the course page.
+    unawaited(LessonImageCache.instance.prefetch(widget.course.imageUrls));
 
     // Try to load blocks from course JSON (v2 format)
     if (widget.course.hasBlockV2Data) {
@@ -212,7 +283,10 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
 
   @override
   void dispose() {
-    ref.read(workTimeTrackerProvider).clearLocation();
+    // Via the cached instance — `ref` must not be used in dispose() (Riverpod
+    // throws, aborting the rest of this method).
+    _workTimeTracker.clearLocation();
+    _openAnswerSaveDebounce?.cancel();
     _scrollController.dispose();
     for (final controller in _textControllers.values) {
       controller.dispose();
@@ -243,13 +317,29 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
       return;
     }
 
+    // The answer-submit moment. It is saved as the block's confirmed_at and
+    // also fills the ts_bubble_open → ts_answer_submit pair, which the step
+    // engine never reports — so the ELO log finally carries a time-on-task.
+    if (_useContentBlocks && index >= 0 && index < _contentBlocks.length) {
+      final blockId = _contentBlocks[index].blockId;
+      final submittedAt = DateTime.now().toUtc();
+      _blockConfirmedAt[blockId] = submittedAt.toIso8601String();
+      final openedAt = DateTime.tryParse(_blockTimestamps[blockId] ?? '');
+      final ts = _blockTimestampData.putIfAbsent(index, () => {});
+      ts['ts_bubble_open'] ??= openedAt?.millisecondsSinceEpoch;
+      ts['ts_answer_submit'] ??= submittedAt.millisecondsSinceEpoch;
+    }
+
     // Wrong atomic answer → seed a Practice (Cvičení) card before advancing.
     // V2 step blocks handle this via BlockStepEngine's onWrongAnswer callback.
+    // Both end up behind the same `seedsPracticeOnWrong` type gate, so an
+    // atomic block (always display/question) only reaches the deck through a
+    // manual bookmark or default_practice — see BR-TF9ZKD.
     if (_useContentBlocks && index >= 0 && index < _contentBlocks.length) {
       final block = _contentBlocks[index];
       if (block.isAtomicFormat &&
           block.isQuestionBlock &&
-          _atomicAnswerIsWrong(block)) {
+          _atomicAnswerIsWrong(block, index)) {
         _autoBookmarkOnWrong(index);
       }
     }
@@ -397,6 +487,10 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
       return;
     }
 
+    // Read up front: the catch below can run after the page is gone.
+    final eloFailureReporter = ref.read(eloFailureReporterProvider);
+    final courseId = widget.course.id;
+
     try {
       final eloRepo = ref.read(eloRepositoryProvider);
       final syncQueue = ref.read(syncQueueProvider);
@@ -405,19 +499,36 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
       final profile = await eloRepo.getOrCreateProfile(user.id);
 
       // Cast relation_vector from nullable doubles to non-nullable (engine expects List<double>)
-      final castRelation = relationVector.map((e) => e ?? 0.0).toList();
+      // and fit every vector to the 35-slot GPF shape the engine insists on
+      // (see gpf_vector_shape.dart).
+      final castRelation = fitGpfVector(
+        relationVector.map((e) => e ?? 0.0).toList(),
+        0.0,
+      );
 
-      // Load cached item solve-counts for this block (falls back to zeros)
-      final itemPocet = await eloRepo.getItemPocet(block.blockId);
+      // The server's calibrated difficulty where it has one, the content's
+      // elsewhere. The task half of the result is discarded: the server is
+      // the only writer of D and its counts (BR-697NCA).
+      final taskElo = await eloRepo.effectiveTaskElo(block.blockId, eloVector);
+      final profilEloBefore = fitGpfVector(profile.profilElo, null);
+
+      // Pilot 2 gaming rule, as in the quiz: an answer submitted under the
+      // threshold after the block was shown is a guess and moves neither the
+      // ratings nor the counters (BR-3N79C3).
+      final gamed = isGamingLessonAttempt(
+        openedAt: _blockTimestamps[block.blockId],
+        confirmedAt: _blockConfirmedAt[block.blockId],
+      );
 
       // Run the ELO engine
       final result = EloEngine.updateTask(
-        profilElo: profile.profilElo,
-        profilPocet: profile.profilPocet,
+        profilElo: profilEloBefore,
+        profilPocet: fitGpfVector(profile.profilPocet, 0),
         relationVector: castRelation,
-        eloVector: eloVector,
-        itemPocet: itemPocet,
+        eloVector: taskElo,
+        itemPocet: List<int>.filled(kGpfDimensions, 0),
         score: score,
+        skipEloUpdate: gamed,
       );
 
       if (result.updatedIndices.isEmpty) {
@@ -426,13 +537,6 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
 
       // Persist updated profile locally
       await eloRepo.saveProfile(user.id, result.profilElo, result.profilPocet);
-
-      // Persist updated block stats locally (item_pocet + elo_vector)
-      await eloRepo.saveBlockStats(
-        block.blockId,
-        result.itemPocet,
-        result.eloVector,
-      );
 
       // Enqueue profile sync (UPDATE — the profile already exists on server or will be created by pull)
       await syncQueue.enqueue(
@@ -445,8 +549,9 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
         },
       );
 
-      // Enqueue interaction log (CREATE — append-only server log)
-      final interactionId = 'elo-${DateTime.now().microsecondsSinceEpoch}';
+      // Enqueue interaction log (CREATE). Its id doubles as the server's
+      // idempotency key, so a re-sent answer never moves D twice.
+      final interactionId = const Uuid().v4();
 
       // Resolve opened/confirmed timestamps for the ELO export.
       // - opened_at: when the block was first revealed (already tracked).
@@ -472,8 +577,13 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
           'help_used': (_hintUsage[blockIndex] ?? 0) >= 2,
           'hint_used': (_hintUsage[blockIndex] ?? 0) >= 1,
           'profil_elo_snapshot': result.profilElo,
-          'elo_vector_snapshot': eloVector,
+          ...taskCalibrationFields(
+            clientUuid: interactionId,
+            profilEloBefore: profilEloBefore,
+            eloVectorUsed: taskElo,
+          ),
           'updated_indices': result.updatedIndices,
+          'elo_config_version': result.configVersion,
           'ts_bubble_open': _blockTimestampData[blockIndex]?['ts_bubble_open'],
           'ts_answer_click': _blockTimestampData[blockIndex]?['ts_answer_click'],
           'ts_answer_submit': submitMs,
@@ -485,7 +595,20 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
         },
       );
 
-    } catch (e, st) { silentLog('lesson_detail_page', e, st); }
+    } catch (e, st) {
+      silentLog('lesson_detail_page', e, st);
+      // silentLog is silent in release builds, and a block whose vectors the
+      // engine rejects would stop moving ELO unnoticed (BR-S9SVNM).
+      unawaited(eloFailureReporter.report(
+        source: 'lesson',
+        courseId: courseId,
+        blockId: block.blockId,
+        error: e,
+        stackTrace: st,
+        relationVector: relationVector,
+        eloVector: eloVector,
+      ));
+    }
   }
 
   /// Mark the current lesson as completed and update progress
@@ -541,6 +664,20 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
         },
       );
 
+      // The course page re-reads this only once the student leaves the
+      // lesson; until then the rail and the next lesson go by this copy.
+      if (mounted) {
+        setState(() {
+          _courseOverride = _course.withLessonProgress(
+            lessonsProgress: lessonsProgress,
+            completedLessons: completedLessonsCount,
+            // updateProgress flips the course to completed at 100 %.
+            isCompleted: progressPercent >= 100 ||
+                userCourse.status == UserCourseStatus.completed,
+          );
+        });
+      }
+
       // Also mark the lesson as completed in the user_progress table
       // so it syncs as is_completed=true via POST /api/user/progress.
       final user = ref.read(activeUserProvider).valueOrNull;
@@ -575,6 +712,8 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
           // until the next reload. Invalidate so they recompute now. (BR-7R5NFZ)
           if (createdCards > 0) {
             ref.invalidate(practiceQueueProvider);
+            // The practice picker reads the cards itself (BR-27AEMT).
+            ref.invalidate(practiceScopeProvider);
           }
         } catch (e, st) {
           silentLog('lesson_detail_page:seed_cards', e, st);
@@ -648,6 +787,7 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
         // Persist and enqueue sync for each
         final now = DateTime.now();
         int totalXpReward = 0;
+        int totalCoinReward = 0;
         for (final achievementId in newlyEarned) {
           final localId = 'ach-${now.microsecondsSinceEpoch}-$achievementId';
           final inserted = await db.insertAchievement(
@@ -668,10 +808,13 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
             );
           }
 
-          // Sum XP rewards from earned achievements
+          // Sum XP and coin rewards from earned achievements
           final def = config.allAchievements.where((a) => a.id == achievementId).firstOrNull;
           if (def != null && def.xpReward > 0) {
             totalXpReward += def.xpReward;
+          }
+          if (def != null && def.coinReward > 0) {
+            totalCoinReward += def.coinReward;
           }
         }
 
@@ -689,6 +832,16 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
             rawXp: totalXpReward,
             courseXpEarned: 0,
             courseMaxXp: null,
+          );
+        }
+
+        // And their EDUX coins (BR-HK9828). Uncapped on purpose: the XP caps
+        // exist to stop one marathon session from levelling an account, and an
+        // achievement is earned once either way.
+        if (totalCoinReward > 0) {
+          await statsRepo.awardCoins(
+            userId: user.id,
+            amount: totalCoinReward,
           );
         }
       } catch (e, st) { silentLog('lesson_detail_page', e, st); }
@@ -728,7 +881,7 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
     }
 
     // Get the next lesson
-    final nextLesson = widget.course.lessons[nextLessonIndex];
+    final nextLesson = _course.lessons[nextLessonIndex];
 
     // Update current lesson index in database
     if (widget.userCourseId != null) {
@@ -745,9 +898,10 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
       // Replace current page with next lesson
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(
+        shellPageRoute(
+          context,
           builder: (context) => LessonDetailPage(
-            course: widget.course,
+            course: _course,
             lesson: nextLesson,
             lessonIndex: nextLessonIndex,
             userCourseId: widget.userCourseId,
@@ -903,11 +1057,14 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
           blockTimestampsJson.putIfAbsent(e.key, () => {});
           blockTimestampsJson[e.key]!.putIfAbsent('opened_at', () => e.value);
         }
-        // Set confirmed_at for completed blocks (putIfAbsent — don't overwrite)
+        // Set confirmed_at for completed blocks (putIfAbsent — don't overwrite).
+        // The recorded submit time, not the save time: the ELO backfill reruns
+        // the gaming filter on this pair and must see what _updateElo saw.
         for (final blockId in completedBlockIds) {
           blockTimestampsJson.putIfAbsent(blockId, () => {});
           blockTimestampsJson[blockId]!.putIfAbsent(
-            'confirmed_at', () => DateTime.now().toUtc().toIso8601String(),
+            'confirmed_at',
+            () => _blockConfirmedAt[blockId] ?? DateTime.now().toUtc().toIso8601String(),
           );
         }
 
@@ -1199,7 +1356,7 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
     if (!_useContentBlocks) return;
     if (index < 0 || index >= _contentBlocks.length) return;
     final block = _contentBlocks[index];
-    if (!block.type.isInteractiveBlock) return;
+    if (!block.type.seedsPracticeOnWrong) return;
     if (block.isBookmarked) return;
 
     final bookmarkNotifier = ref.read(bookmarkProvider.notifier);
@@ -1217,12 +1374,16 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
   /// True when an atomic question block was answered incorrectly, based on the
   /// single selected option id (multiple_choice/true_false) or typed text (open).
   /// Multi-select questions aren't tracked via selectedOptionId → treated as not-wrong.
-  bool _atomicAnswerIsWrong(ContentBlock block) {
+  bool _atomicAnswerIsWrong(ContentBlock block, int index) {
     final q = block.atomicQuestion;
     if (q == null) return false;
     final answer = block.selectedOptionId;
     if (answer == null || answer.isEmpty) return false;
     if (q.isOpen) {
+      // An AI-graded answer already has a verdict; re-running the string
+      // comparison here would bookmark correct answers as wrong.
+      final ai = _aiResults[index];
+      if (ai != null) return !ai.isCorrect;
       final correct = q.correctAnswer?.trim().toLowerCase() ?? '';
       return answer.trim().toLowerCase() != correct;
     }
@@ -1434,10 +1595,18 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
   }
 
   /// Enqueue content feedback to the sync queue for server submission.
+  ///
+  /// [flushNow] runs a sync straight away instead of waiting for the periodic
+  /// timer. The mentor sheet passes false: its question is enqueued in the same
+  /// breath as the chat POST, and a full sync (pushes, eight pulls, practice
+  /// reconciliation) competing with the answer the student is waiting for buys
+  /// nothing — the sync that fires on the answer's last token flushes it a few
+  /// seconds later (BR-M7EQY8).
   Future<void> _enqueueFeedback({
     required String blockId,
     required String type,
     String? message,
+    bool flushNow = true,
   }) async {
     final syncQueue = ref.read(syncQueueProvider);
     final recordId = '${widget.course.id}_${blockId}_${DateTime.now().millisecondsSinceEpoch}';
@@ -1456,8 +1625,10 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
       );
 
       // Trigger sync immediately so feedback is sent without waiting for periodic timer.
-      final syncService = ref.read(syncServiceProvider);
-      syncService.sync();
+      if (flushNow) {
+        final syncService = ref.read(syncServiceProvider);
+        syncService.sync();
+      }
     } catch (e, st) { silentLog('lesson_detail_page', e, st); }
   }
 
@@ -1468,82 +1639,65 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
     final courseName = widget.course.title;
     final lessonName = widget.lesson.title;
 
-    // Gather rich block context
-    final hint = block?.currentHint ?? '';
-    final help = block?.currentHelp ?? '';
-
-    // Collect all text from the block (all steps)
-    String blockContent = '';
-    if (block != null) {
-      if (block.steps.isNotEmpty) {
-        final stepTexts = block.steps
-            .map((s) => s.displayText)
-            .where((t) => t.isNotEmpty)
-            .toList();
-        blockContent = stepTexts.join('\n');
-      } else {
-        blockContent = block.displayContent;
-      }
-    }
-
-    // For question blocks, include the question and options
-    String questionInfo = '';
-    if (block?.atomicQuestion != null) {
-      final q = block!.atomicQuestion!;
-      final optionTexts = q.options.map((o) => '- ${o.text}').join('\n');
-      questionInfo = AppStrings.chatContextQuestionWithOptions(optionTexts);
-    } else if (block != null) {
-      // V2 step-based questions — find evaluation steps
-      for (final step in block.steps) {
-        if (step.evaluationConfig != null) {
-          final opts = step.evaluationConfig!.options.map((o) => '- ${o.text}').join('\n');
-          if (opts.isNotEmpty) {
-            questionInfo = AppStrings.chatContextQuestionWithOptions(opts);
-            break;
-          }
-        }
-      }
-    }
-
-    // Build a natural help request message
-    final contextParts = <String>[
-      lessonName.isNotEmpty
-          ? AppStrings.chatContextHelpIntroLesson(courseName, lessonName)
-          : AppStrings.chatContextHelpIntro(courseName),
-      '',
-      if (blockContent.isNotEmpty) AppStrings.chatContextHelpTaskContent(blockContent.length > 400 ? '${blockContent.substring(0, 400)}...' : blockContent),
-      if (questionInfo.isNotEmpty) questionInfo,
-      if (hint.isNotEmpty) AppStrings.chatContextHelpHint(hint),
-      if (help.isNotEmpty) AppStrings.chatContextHelpDetail(help),
-      '',
-      if (studentMessage != null && studentMessage.isNotEmpty)
-        AppStrings.chatContextStudentQuery(studentMessage)
-      else
-        AppStrings.chatContextFallbackPrompt,
-    ];
-    final contextMessage = contextParts.where((s) => s.isNotEmpty || contextParts.indexOf(s) == 1).join('\n');
+    // BlockStepEngine owns the real step index internally and only mirrors it
+    // into _stepProgress; the ContentBlock's own currentStepIndex stays frozen
+    // at 0. Pass the live index in so the context describes the step the
+    // student is actually on, not an earlier one (BR-J43MA4).
+    // The task context goes to the model as a hidden message, so it is built
+    // without a closing request; the student's own question opens the visible
+    // transcript instead of the whole blob (BR-NAH3TR).
+    final contextMessage = buildLessonChatContext(
+      block: block,
+      courseName: courseName,
+      lessonName: lessonName,
+      liveStepIndex:
+          block == null ? null : _stepProgress[block.blockId]?.currentStepIndex,
+      includeClosingPrompt: false,
+    );
 
     // Navigate to chat with pre-filled context
     Navigator.push(
       context,
-      MaterialPageRoute(
+      shellPageRoute(
+        context,
         builder: (_) => ChatDetailPage(
           sessionId: '', // empty = create new session
           sessionTitle: lessonName.isNotEmpty ? lessonName : courseName,
           persona: ChatPersona.mathMentor,
           initialContext: contextMessage,
+          initialQuestion: (studentMessage != null &&
+                  studentMessage.trim().isNotEmpty)
+              ? studentMessage.trim()
+              : null,
         ),
       ),
     );
   }
 
-  void _showHintDialog(int index) {
+  /// Open the mentor sheet for the block at [index], scoped to [stepId].
+  ///
+  /// [stepId] is the step whose "?" was tapped — BlockStepEngine reports it,
+  /// because the block's own step cursor stays frozen at 0 and would answer
+  /// with the first step's hint (or the block's shared one) whatever step the
+  /// student is on (BR-JHDNB3). Null for atomic blocks, which have no steps.
+  void _showHintDialog(int index, [String? stepId]) {
     final block = _useContentBlocks ? _contentBlocks[index] : null;
-    if (block == null || !block.hasHint) return;
+    if (block == null || !block.hasHintForStep(stepId)) return;
 
-    showLessonHintSheet(
+    final practiceUnavailable =
+        practiceOptionUnavailable(block: block, course: widget.course);
+
+    showMentorSheet(
       context: context,
       block: block,
+      stepId: stepId,
+      buildAiContext: () => buildLessonChatContext(
+        block: block,
+        courseName: widget.course.title,
+        lessonName: widget.lesson.title,
+        liveStepIndex: _stepProgress[block.blockId]?.currentStepIndex,
+        includeClosingPrompt: false,
+      ),
       onShown: () {
         // Track hint usage for ELO score penalty (max of previous value)
         final prev = _hintUsage[index] ?? 0;
@@ -1563,17 +1717,29 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
         hintEvents.add(now);
         tracking['hint_events'] = hintEvents;
       },
-      onSavePractice: () {
-        // Actually save the bookmark for practice
-        final bookmarkNotifier = ref.read(bookmarkProvider.notifier);
-        final currentBlock = _contentBlocks[index];
-        if (!currentBlock.isBookmarked) {
-          bookmarkNotifier.addBookmark(widget.course.id, currentBlock, lessonId: widget.lesson.id);
-          setState(() {
-            _contentBlocks[index] = currentBlock.copyWith(isBookmarked: true);
-          });
-        }
-      },
+      onSavePractice: practiceUnavailable
+          ? null
+          : () {
+              // Actually save the bookmark for practice. Ask the notifier rather
+              // than the block flag — `isBookmarked` is also true for
+              // default_practice blocks, which would skip the write (BR-FEQ97Q).
+              // The sheet hides the option in that case, so this is a
+              // duplicate-row guard only.
+              final bookmarkNotifier = ref.read(bookmarkProvider.notifier);
+              final currentBlock = _contentBlocks[index];
+              if (!bookmarkNotifier.isBookmarked(
+                  widget.course.id, currentBlock.blockId)) {
+                bookmarkNotifier.addBookmark(widget.course.id, currentBlock,
+                    lessonId: widget.lesson.id);
+              }
+              setState(() {
+                _contentBlocks[index] = currentBlock.copyWith(isBookmarked: true);
+                // Mirrors _toggleBookmark: re-adding must undo an earlier
+                // removal, otherwise the block stays filtered out of Cvičení.
+                _removedPracticeBlocks.remove(currentBlock.blockId);
+              });
+              _saveProgress();
+            },
       onEscalateToHelp: () {
         // Escalate hint usage to "help" level for ELO penalty
         _hintUsage[index] = 2;
@@ -1588,8 +1754,10 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
         t['help_events'] = helpEvents;
         _hintHelpTracking[block.blockId] = t;
       },
-      onAskAi: () {
-        // Track assistant (Ask-AI) opens for the admin postup timeline (BR-BBK5FP).
+      onAskMentor: (question, {required isFirst}) {
+        // Track assistant opens for the admin postup timeline (BR-BBK5FP).
+        // Every question counts; the conversation now happens inside the sheet
+        // rather than on a pushed chat page.
         final blockId = block.blockId;
         final now = DateTime.now().toUtc().toIso8601String();
         final t = _hintHelpTracking[blockId] ?? {};
@@ -1600,22 +1768,72 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
         assistantEvents.add(now);
         t['assistant_events'] = assistantEvents;
         _hintHelpTracking[blockId] = t;
-        _openChatWithContext(index);
-      },
-      onSendFeedback: (studentMessage) {
-        // Also save as feedback
-        _enqueueFeedback(
-          blockId: block.blockId,
-          type: 'question',
-          message: studentMessage,
-        );
-        _openChatWithContext(index, studentMessage: studentMessage);
+
+        // The opening question doubles as block feedback, exactly like the
+        // "Upřesni svůj dotaz" form it replaces. Follow-ups are ordinary chat.
+        if (isFirst) {
+          _enqueueFeedback(
+            blockId: blockId,
+            type: 'question',
+            message: question,
+            flushNow: false,
+          );
+        }
       },
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    if (context.widthClass == WidthClass.compact) {
+      return ContentWidth(
+        maxWidth: ContentWidth.reading,
+        child: _buildPage(context),
+      );
+    }
+    // Wide: shell chrome, the existing lesson column in the middle, and a rail
+    // carrying course progress, the AI-help prompt and the lesson list.
+    return DetailShell(
+      backLabel: widget.course.title,
+      onBack: () => _safePop(),
+      child: _buildWidePage(context),
+    );
+  }
+
+  Widget _buildWidePage(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const pad = 32.0;
+        final withRail = hasSideRail(constraints.maxWidth - pad * 2);
+
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(pad, 8, pad, 24),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // The phone page verbatim — it already owns the header, the
+              // block list and the completion nav.
+              Expanded(child: _buildPage(context, showHeader: false)),
+              if (withRail) ...[
+                const SizedBox(width: 24),
+                SizedBox(
+                  width: _railWidth,
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: _buildLessonRail(),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPage(BuildContext context, {bool showHeader = true}) {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) async {
@@ -1628,15 +1846,16 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
       body: Column(
             children: [
               // Fixed header at top
-              LessonHeader(
-                courseTitle: widget.course.title,
-                lessonTitle: widget.lesson.title,
-                lessonIndex: widget.lessonIndex,
-                xpReward: widget.lesson.xpReward,
-                completedCount: _completedCount,
-                blockCount: _blockCount,
-                onBack: () => _safePop(),
-              ),
+              if (showHeader)
+                LessonHeader(
+                  courseTitle: widget.course.title,
+                  lessonTitle: widget.lesson.title,
+                  lessonIndex: widget.lessonIndex,
+                  xpReward: widget.lesson.xpReward,
+                  completedCount: _completedCount,
+                  blockCount: _blockCount,
+                  onBack: () => _safePop(),
+                ),
               // Scrollable content
               Expanded(
                 child: Stack(
@@ -1826,11 +2045,35 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
         onLikeToggle: () => _toggleLike(index),
         onDislikeToggle: () => _toggleDislike(index),
         onWrongAnswer: () => _autoBookmarkOnWrong(index),
-        onHintRequested: block.hasHint ? () => _showHintDialog(index) : null,
+        openAnswerScore: widget.course.openAnswerScore,
+        showAnswerStatus: widget.course.quizEvaluate,
+        onOpenAnswerEvaluated: (event) => unawaited(
+          ref.read(openAnswerRepositoryProvider).record(
+                attemptId: event.attemptId,
+                courseId: widget.course.id,
+                lessonId: widget.lesson.id,
+                blockId: event.blockId,
+                stepId: event.stepId,
+                answerText: event.answerText,
+                photoName: event.photoName,
+                isCorrect: event.isCorrect,
+                failed: event.failed,
+                evaluatedByAi: event.evaluatedByAi,
+                aiScore: event.aiScore,
+                aiFeedback: event.aiFeedback,
+                aiModel: event.aiModel,
+                feedback: event.feedbackParts,
+                criteriaScores: event.criteriaScores,
+                gradingBasis: event.gradingBasis,
+                promptVersion: event.promptVersion,
+              ),
+        ),
+        // The engine decides which steps offer a hint and reports the step id —
+        // it is the only holder of the live step index (BR-JHDNB3).
+        onHintRequested: (stepId) => _showHintDialog(index, stepId),
         isBookmarked: block.isBookmarked,
         isLiked: block.isLiked,
         isDisliked: block.isDisliked,
-        hasHint: block.hasHint,
         // Per-step actions (display blocks — each step independently actionable)
         onStepBookmarkToggle: (stepId) => _toggleStepBookmark(index, stepId),
         onStepLikeToggle: (stepId) => _toggleStepLike(index, stepId),
@@ -1907,13 +2150,14 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
       }
       // Save current lesson's progress before jumping to another lesson
       await _saveProgress();
-      final targetLesson = widget.course.lessons[target.lessonIndex];
+      final targetLesson = _course.lessons[target.lessonIndex];
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(
+        shellPageRoute(
+          context,
           builder: (context) => LessonDetailPage(
-            course: widget.course,
+            course: _course,
             lesson: targetLesson,
             lessonIndex: target.lessonIndex,
             userCourseId: widget.userCourseId,
@@ -1966,9 +2210,16 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
   Widget _buildAtomicQuestionCard(
       int index, bool isCurrent, ContentBlock block) {
     final question = block.atomicQuestion;
-    final openInput = (question != null && question.isOpen)
+    final isOpen = question != null && question.isOpen;
+    final openInput = isOpen
         ? _buildOpenQuestionInput(index, block, question)
         : null;
+    // Open questions persist a draft into selectedOptionId as the user types
+    // (BR-A7AHKR), so confirm is gated on the answer being checked/evaluated —
+    // not on there being any text. Choice questions still gate on a selection.
+    final canConfirm = isOpen
+        ? _answeredBlocks.contains(index)
+        : block.selectedOptionId != null;
     return LessonAtomicQuestionCard(
       block: block,
       question: question,
@@ -1976,7 +2227,7 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
       evaluate: widget.course.quizEvaluate,
       openInput: openInput,
       actionRow: _buildActionButtonsRowForContentBlock(index, isCurrent,
-          canConfirm: block.selectedOptionId != null),
+          canConfirm: canConfirm),
       onOptionSelected: (optionId) =>
           _handleAtomicOptionSelected(index, optionId),
     );
@@ -1984,29 +2235,82 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
 
   Widget _buildOpenQuestionInput(
       int index, ContentBlock block, AtomicQuestion question) {
-    _textControllers[index] ??= TextEditingController();
+    // Seed the controller from the persisted draft so a typed-but-not-yet
+    // confirmed answer survives leaving/reloading the lesson (BR-A7AHKR).
+    _textControllers[index] ??=
+        TextEditingController(text: block.selectedOptionId ?? '');
     final controller = _textControllers[index]!;
     final userAnswer = controller.text.trim();
-    final correctAnswer = question.correctAnswer?.trim() ?? '';
     final isAnswered =
         _answeredBlocks.contains(index) || block.isCompleted;
-    final isCorrect =
-        userAnswer.toLowerCase() == correctAnswer.toLowerCase();
+    // An AI verdict, when present, overrides the exact-match comparison —
+    // which accepts any variant listed on its own line (BR-RBUR29).
+    final ai = _aiResults[index];
+    final isCorrect = ai?.isCorrect ??
+        matchesExpectedAnswer(userAnswer, question.correctAnswer);
     return LessonAtomicOpenQuestionInput(
       controller: controller,
       question: question,
       userAnswer: userAnswer,
-      correctAnswer: correctAnswer,
       isAnswered: isAnswered,
       isCorrect: isCorrect,
       showEvaluation: widget.course.quizEvaluate,
-      onChanged: () => setState(() {}),
+      feedback: ai?.feedback,
+      aiFeedback: ai?.feedbackText,
+      isEvaluating: _evaluatingIndex == index,
+      // Photo + retry wiring for AI-evaluated open answers (BR-P745Q8).
+      pickedPhoto: _pickedPhotos[index],
+      uploadedPhotoName: _photoNames[index],
+      isUploadingPhoto: _uploadingPhotoIndexes.contains(index),
+      photoUnreadable: _unreadablePhotoIndexes.contains(index),
+      evaluationFailure: _evaluationFailures[index],
+      onPhotoPicked: (photo) => setState(() {
+        _pickedPhotos[index] = photo;
+        _photoNames.remove(index);
+        _unreadablePhotoIndexes.remove(index);
+      }),
+      onPhotoRemoved: () => setState(() {
+        _pickedPhotos.remove(index);
+        _photoNames.remove(index);
+        _unreadablePhotoIndexes.remove(index);
+      }),
+      onRetryEvaluation: () =>
+          unawaited(_checkOpenAnswerWithAi(index, block, question, userAnswer)),
+      onChanged: () => _onOpenAnswerChanged(index),
       onCheckAnswer: () => _checkOpenAnswer(index, block, question),
     );
   }
 
-  /// Check open answer and mark block as completed
+  /// Persist an in-progress open-question draft as the user types (BR-A7AHKR).
+  ///
+  /// The draft is mirrored into `selectedOptionId` (which `_saveProgress`
+  /// persists as `block_answers`) so it is restored on the next lesson open,
+  /// and the DB write is debounced to avoid a round-trip per keystroke. The
+  /// confirm checkmark stays gated on `_answeredBlocks` — see
+  /// `_buildAtomicQuestionCard` — so a draft never lets the student skip the
+  /// "Zkontrolovat" (check/AI-eval) step.
+  void _onOpenAnswerChanged(int index) {
+    final controller = _textControllers[index];
+    if (controller == null) return;
+    setState(() {
+      _contentBlocks[index] =
+          _contentBlocks[index].copyWith(selectedOptionId: controller.text);
+    });
+    _openAnswerSaveDebounce?.cancel();
+    _openAnswerSaveDebounce = Timer(
+      const Duration(milliseconds: 600),
+      () => unawaited(_saveProgress()),
+    );
+  }
+
+  /// Check open answer and mark block as completed.
+  ///
+  /// Every open answer goes through the API first (BR-N26ACB) — `ai_evaluation`
+  /// only decides whether the student sees the AI's feedback or a plain
+  /// right/wrong with the solution. When the AI cannot be reached the answer
+  /// is compared with the expected one instead.
   void _checkOpenAnswer(int index, ContentBlock block, AtomicQuestion question) {
+    if (_evaluatingIndex != null) return;
 
     final controller = _textControllers[index];
     if (controller == null) {
@@ -2014,11 +2318,96 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
     }
 
     final userAnswer = controller.text.trim();
-    if (userAnswer.isEmpty) {
+    final hasPhoto = _pickedPhotos[index] != null || _photoNames[index] != null;
+    if (userAnswer.isEmpty && !hasPhoto) {
       return;
     }
 
+    unawaited(_checkOpenAnswerWithAi(index, block, question, userAnswer));
+  }
 
+  Future<void> _checkOpenAnswerWithAi(
+    int index,
+    ContentBlock block,
+    AtomicQuestion question,
+    String userAnswer,
+  ) async {
+    setState(() {
+      _evaluatingIndex = index;
+      _evaluationFailures.remove(index);
+    });
+
+    final evaluator = ref.read(aiAnswerEvaluatorProvider);
+
+    // Upload an attached photo first. A failed upload is not fatal — the answer
+    // may also have text, and the picked file stays so a retry needs no new
+    // picture.
+    String? photoName = _photoNames[index];
+    if (question.allowPhoto && _pickedPhotos[index] != null && photoName == null) {
+      setState(() => _uploadingPhotoIndexes.add(index));
+      final uploaded = await evaluator.uploadPhoto(
+        bytes: _pickedPhotos[index]!.bytes,
+        filename: _pickedPhotos[index]!.filename,
+        courseId: widget.course.id,
+      );
+      if (!mounted) return;
+      setState(() {
+        _uploadingPhotoIndexes.remove(index);
+        if (uploaded != null) _photoNames[index] = uploaded.name;
+      });
+      photoName = uploaded?.name;
+    }
+
+    final outcome = await evaluator.evaluate(
+      question: block.content ?? '',
+      studentAnswer: userAnswer,
+      photoName: photoName,
+      help: block.atomicHelp,
+      solution: question.solution,
+      correctAnswer: question.correctAnswer,
+      criteria: question.aiCriteria,
+      criteriaList: question.aiCriteriaList,
+    );
+
+    if (!mounted) return;
+    setState(() => _evaluatingIndex = null);
+
+    // The student may have moved on while the call was in flight.
+    if (_answeredBlocks.contains(index)) return;
+
+    if (!outcome.isSuccess) {
+      // Offline, or the AI gave nothing back: grade by comparison with the
+      // expected answer instead (BR-N26ACB), `ai_evaluation` on or off. The
+      // student gets right/wrong and the solution, never the expected answer.
+      if (userAnswer.isNotEmpty) {
+        setState(() => _aiResults.remove(index));
+        _applyOpenAnswer(index, block, question, userAnswer,
+            photoName: photoName);
+        return;
+      }
+      // A photo on its own has nothing to compare. The block stays unanswered
+      // so the student can try again, but the attempt is still recorded — a
+      // failure a teacher cannot see is a failure nobody fixes.
+      setState(() => _evaluationFailures[index] = outcome.failure!);
+      _recordOpenAnswer(index, block, question, userAnswer,
+          photoName: photoName, failed: true);
+      return;
+    }
+
+    setState(() {
+      _aiResults[index] = outcome.result!;
+      if (outcome.result!.photoUnreadable) _unreadablePhotoIndexes.add(index);
+    });
+    _applyOpenAnswer(index, block, question, userAnswer, photoName: photoName);
+  }
+
+  void _applyOpenAnswer(
+    int index,
+    ContentBlock block,
+    AtomicQuestion question,
+    String userAnswer, {
+    String? photoName,
+  }) {
     // Store the answer and mark block as answered (shows result + solution)
     // The user must then tap the checkmark to confirm and advance.
     setState(() {
@@ -2027,6 +2416,58 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
       );
       _answeredBlocks.add(index);
     });
+
+    // Flush the checked answer now rather than waiting on the typing debounce,
+    // so it survives leaving the lesson before confirming the block (BR-A7AHKR).
+    _openAnswerSaveDebounce?.cancel();
+    unawaited(_saveProgress());
+
+    _recordOpenAnswer(index, block, question, userAnswer, photoName: photoName);
+  }
+
+  /// Queue the attempt so a teacher can read what the student wrote.
+  ///
+  /// Goes through the sync queue, not a direct post: an answer given offline
+  /// used to vanish, which is the one case an offline-first app exists for.
+  void _recordOpenAnswer(
+    int index,
+    ContentBlock block,
+    AtomicQuestion question,
+    String userAnswer, {
+    String? photoName,
+    bool failed = false,
+  }) {
+    final ai = _aiResults[index];
+    final isCorrect = failed
+        ? false
+        : ai?.isCorrect ??
+            matchesExpectedAnswer(userAnswer, question.correctAnswer);
+
+    unawaited(ref.read(openAnswerRepositoryProvider).record(
+          // Fresh id per submission, so a retry appends an attempt instead of
+          // overwriting the one that failed.
+          attemptId: OpenAnswerRepository.newAttemptId(),
+          courseId: widget.course.id,
+          lessonId: widget.lesson.id,
+          blockId: block.blockId,
+          answerText: userAnswer,
+          photoName: photoName,
+          isCorrect: isCorrect,
+          failed: failed,
+          evaluatedByAi: !failed && ai != null,
+          aiScore: failed ? null : ai?.score,
+          aiFeedback: failed ? null : ai?.feedbackText,
+          aiModel: failed ? null : ai?.model,
+          feedback: failed ? null : ai?.feedback?.toJson(),
+          criteriaScores: failed ? const [] : (ai?.criteriaScores ?? const []),
+          promptVersion: failed ? null : ai?.promptVersion,
+          gradingBasis: OpenAnswerRepository.gradingBasisFor(
+            question: block.content ?? '',
+            expectedAnswer: question.correctAnswer,
+            solution: question.solution,
+            criteria: question.aiCriteriaList,
+          ),
+        ));
   }
 
   /// Handle option selection for atomic question blocks
@@ -2118,7 +2559,11 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
       onBookmark: () => _toggleBookmark(index),
       onLike: () => _toggleLike(index),
       onDislike: () => _toggleDislike(index),
-      onShowHint: () => _showHintDialog(index),
+      // Legacy/atomic cards are not driven by BlockStepEngine, so the block's
+      // own cursor is the only step they have — the same one the row's
+      // `block.hasHint` gate reads.
+      onShowHint: () =>
+          _showHintDialog(index, _contentBlocks[index].currentStep?.stepId),
       onMarkAnswered: () => setState(() => _answeredBlocks.add(index)),
       onConfirm: () => _confirmBlock(index),
     );
@@ -2235,9 +2680,12 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
     );
   }
 
-  /// Navigate to Kvíz (all question blocks)
-  void _navigateToKviz() {
-    final questionBlocks = widget.course.getAllQuestionBlocks();
+  /// Navigate to Kvíz — ten ELO-matched questions, like the global quiz
+  /// (BR-WRMW7W); see [courseQuizBlocks].
+  Future<void> _navigateToKviz() async {
+    final questionBlocks =
+        await courseQuizBlocks(ref, widget.course, _kvizProgress);
+    if (!mounted) return;
 
     if (questionBlocks.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2265,5 +2713,378 @@ class _LessonDetailPageState extends ConsumerState<LessonDetailPage> {
       ),
     );
   }
+
+  // ── Wide layout rail ──────────────────────────────────────────────────
+
+  /// Width of the lesson page's right-hand rail.
+  static const double _railWidth = 340;
+
+  /// How many lessons the rail lists before "show all".
+  static const int _railLessonLimit = 3;
+
+  /// Expanded state of the rail's lesson list.
+  bool _railShowAllLessons = false;
+
+  List<Widget> _buildLessonRail() {
+    final lessons = _course.lessons;
+    final done =
+        lessons.where((l) => l.status == LessonStatus.completed).length;
+
+    return [
+      ProgressRingCard(
+        lessonsDone: done,
+        lessonsTotal: lessons.length,
+        hintOverride: AppStrings.courseTrophyHint,
+        showBar: true,
+        trailingIcon: Icons.emoji_events_outlined,
+        // The lesson's reward, which used to live in the header's badge.
+        xpLabel: widget.lesson.xpReward > 0
+            ? '+${widget.lesson.xpReward} XP'
+            : null,
+      ),
+      const SizedBox(height: 16),
+      _buildAiHelpCard(),
+      const SizedBox(height: 16),
+      _buildRailLessonList(lessons),
+    ];
+  }
+
+  Widget _buildAiHelpCard() {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: AppDecorations.cardDecorationLight,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(AppStrings.lessonAiHelpTitle, style: AppTextStyles.heading4()),
+          const SizedBox(height: 16),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Image.asset(
+                'assets/images/skins_bg.png',
+                width: 72,
+                height: 72,
+                fit: BoxFit.contain,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(AppStrings.lessonAiHelpQuestion,
+                        style: AppTextStyles.bodySemiBold()),
+                    const SizedBox(height: 4),
+                    Text(
+                      AppStrings.lessonAiHelpBody,
+                      style: AppTextStyles.bodySmall(
+                          color: AppColors.primaryDark64),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          GestureDetector(
+            // Same entry point the in-block "ask AI" action uses, so the chat
+            // opens with this lesson's context attached.
+            onTap: () => _openChatWithContext(
+              _currentBlockIndex.clamp(0, (_blockCount - 1).clamp(0, 9999)),
+            ),
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+              decoration: BoxDecoration(
+                color: AppColors.primary,
+                borderRadius: AppDecorations.radiusM,
+              ),
+              child: Text(
+                AppStrings.lessonAiHelpButton,
+                textAlign: TextAlign.center,
+                style: AppTextStyles.actionSmall(color: AppColors.surface),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRailLessonList(List<Lesson> lessons) {
+    if (lessons.isEmpty) return const SizedBox.shrink();
+
+    final collapsed =
+        !_railShowAllLessons && lessons.length > _railLessonLimit;
+    final shown =
+        collapsed ? lessons.take(_railLessonLimit).toList() : lessons;
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: AppDecorations.cardDecorationLight,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '${AppStrings.lessonFallbackName(widget.lessonIndex + 1)}: '
+            '${widget.lesson.title}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AppTextStyles.heading4(),
+          ),
+          if (_blockCount > 0) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: _completedCount / _blockCount,
+                      minHeight: 6,
+                      backgroundColor: AppColors.progressTrack,
+                      valueColor:
+                          AlwaysStoppedAnimation(AppColors.progressFill),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '$_completedCount/$_blockCount',
+                  style: AppTextStyles.meta(color: AppColors.primaryDark64),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 16),
+          for (var i = 0; i < shown.length; i++) ...[
+            _buildRailLessonRow(shown[i], i),
+            if (i < shown.length - 1) const SizedBox(height: 8),
+          ],
+          if (lessons.length > _railLessonLimit) ...[
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: () =>
+                  setState(() => _railShowAllLessons = !_railShowAllLessons),
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                decoration: BoxDecoration(
+                  borderRadius: AppDecorations.radiusM,
+                  border: Border.all(color: AppColors.primaryDark12),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      collapsed
+                          ? AppStrings.courseShowAllLessons(lessons.length)
+                          : AppStrings.courseShowFewerLessons,
+                      style: AppTextStyles.actionSmall(),
+                    ),
+                    const SizedBox(width: 6),
+                    Icon(
+                      collapsed
+                          ? Icons.keyboard_arrow_down_rounded
+                          : Icons.keyboard_arrow_up_rounded,
+                      size: 20,
+                      color: AppColors.primaryDark64,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRailLessonRow(Lesson lesson, int index) {
+    final isCurrent = index == widget.lessonIndex;
+    final isDone = lesson.status == LessonStatus.completed;
+    final isLocked = lesson.status == LessonStatus.locked && !isCurrent;
+
+    return GestureDetector(
+      // Replaces the route rather than stacking lessons, matching
+      // [_navigateToNextLesson].
+      onTap: isLocked || isCurrent ? null : () => _openLesson(lesson, index),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: isCurrent
+              ? AppColors.primary.withValues(alpha: 0.08)
+              : Colors.transparent,
+          borderRadius: AppDecorations.radiusM,
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: isCurrent ? AppColors.primary : AppColors.background,
+                shape: BoxShape.circle,
+              ),
+              child: Center(
+                child: Text(
+                  '${index + 1}',
+                  style: AppTextStyles.badge(
+                    color:
+                        isCurrent ? AppColors.surface : AppColors.primaryDark,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    lesson.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTextStyles.bodySemiBold(),
+                  ),
+                  Text(
+                    AppStrings.courseQuestionsCount(lesson.questionCount),
+                    style: AppTextStyles.meta(color: AppColors.primaryDark64),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            if (isDone)
+              Icon(Icons.check_circle, size: 20, color: AppColors.success)
+            else if (isLocked)
+              Icon(Icons.lock_outline,
+                  size: 18, color: AppColors.primaryDark48),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Open another lesson of this course from the rail.
+  Future<void> _openLesson(Lesson lesson, int index) async {
+    if (_pendingSave != null) await _pendingSave;
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      shellPageRoute(
+        context,
+        builder: (context) => LessonDetailPage(
+          course: _course,
+          lesson: lesson,
+          lessonIndex: index,
+          userCourseId: widget.userCourseId,
+        ),
+      ),
+    );
+  }
 }
 
+/// Builds the pre-filled AI-chat context for a lesson [block], scoped to the
+/// step the student is currently on.
+///
+/// [liveStepIndex] is the real step index reported by BlockStepEngine (mirrored
+/// via StepProgressData). The block's own `currentStepIndex` is unreliable here
+/// (it stays frozen at 0), so we align it from the live value before reading any
+/// step-scoped context. Without this alignment a multi-step block — e.g. an
+/// answered MCQ step followed by the current open question — leaked the earlier
+/// step's question/options/hint into the AI context (BR-J43MA4).
+///
+/// Kept as a pure top-level function so the context assembly is unit-testable
+/// independently of the widget tree.
+String buildLessonChatContext({
+  required ContentBlock? block,
+  required String courseName,
+  required String lessonName,
+  required int? liveStepIndex,
+  String? studentMessage,
+  bool includeClosingPrompt = true,
+}) {
+  // Align the block's step cursor with the engine's live position.
+  if (block != null && block.steps.isNotEmpty && liveStepIndex != null) {
+    block.currentStepIndex = liveStepIndex.clamp(0, block.steps.length - 1);
+  }
+
+  // Step-scoped hint/help now resolve against the aligned currentStepIndex.
+  final hint = sanitizeAiContext(block?.currentHint ?? '');
+  final help = sanitizeAiContext(block?.currentHelp ?? '');
+
+  // Collect the task text for the current step. Include preceding display /
+  // setup steps (they frame the question and were already shown), but skip
+  // other evaluation steps — those are separately answered questions whose text
+  // must not leak into the context for the step the student is on.
+  String blockContent = '';
+  if (block != null) {
+    if (block.steps.isNotEmpty) {
+      final curIdx = block.currentStepIndex;
+      final stepTexts = <String>[];
+      for (var i = 0; i < block.steps.length && i <= curIdx; i++) {
+        final step = block.steps[i];
+        if (i != curIdx && step.isEvaluationStep) continue;
+        if (step.displayText.isNotEmpty) stepTexts.add(step.displayText);
+      }
+      blockContent = stepTexts.join('\n');
+    } else {
+      blockContent = block.displayContent;
+    }
+  }
+  // Drop media links before the 400-char budget is measured, so a long image
+  // URL can no longer crowd out the task statement itself (BR-KFHPAR).
+  blockContent = sanitizeAiContext(blockContent);
+
+  // For question blocks, include the options for the CURRENT question only.
+  String questionInfo = '';
+  if (block?.atomicQuestion != null) {
+    final q = block!.atomicQuestion!;
+    final optionTexts =
+        q.options.map((o) => '- ${sanitizeAiContext(o.label)}').join('\n');
+    if (optionTexts.isNotEmpty) {
+      questionInfo = AppStrings.chatContextQuestionWithOptions(optionTexts);
+    }
+  } else {
+    // V2 step-based question — options come from the current step, not from
+    // whichever earlier step happened to have some.
+    final cfg = block?.currentStep?.evaluationConfig;
+    if (cfg != null) {
+      final opts =
+          cfg.options.map((o) => '- ${sanitizeAiContext(o.label)}').join('\n');
+      if (opts.isNotEmpty) {
+        questionInfo = AppStrings.chatContextQuestionWithOptions(opts);
+      }
+    }
+  }
+
+  // Build a natural help request message.
+  final contextParts = <String>[
+    lessonName.isNotEmpty
+        ? AppStrings.chatContextHelpIntroLesson(courseName, lessonName)
+        : AppStrings.chatContextHelpIntro(courseName),
+    '',
+    if (blockContent.isNotEmpty)
+      AppStrings.chatContextHelpTaskContent(
+          blockContent.length > 400 ? '${blockContent.substring(0, 400)}...' : blockContent),
+    if (questionInfo.isNotEmpty) questionInfo,
+    if (hint.isNotEmpty) AppStrings.chatContextHelpHint(hint),
+    if (help.isNotEmpty) AppStrings.chatContextHelpDetail(help),
+    '',
+    // The mentor sheet sends the student's question as its own visible message,
+    // so it asks for the context without a closing request tacked on.
+    if (!includeClosingPrompt)
+      ''
+    else if (studentMessage != null && studentMessage.isNotEmpty)
+      AppStrings.chatContextStudentQuery(studentMessage)
+    else
+      AppStrings.chatContextFallbackPrompt,
+  ];
+  return contextParts
+      .where((s) => s.isNotEmpty || contextParts.indexOf(s) == 1)
+      .join('\n');
+}

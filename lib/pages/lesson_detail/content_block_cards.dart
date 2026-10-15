@@ -4,10 +4,11 @@ import '../../core/theme/app_theme.dart';
 import '../../core/strings/app_strings.dart';
 import '../../core/utils/image_url.dart';
 import '../../models/course_model.dart';
+import '../../widgets/lesson_image.dart';
 import '../../widgets/markdown_latex_widget.dart';
 import 'card_container.dart';
 import 'network_image.dart';
-import 'video_embed.dart';
+import '../../widgets/video_embed.dart';
 
 /// Text card for ContentBlock step (markdown / HTML / plain text + optional
 /// step image).
@@ -36,6 +37,7 @@ class LessonContentTextCard extends StatelessWidget {
         else if (step.hasHtmlContent)
           Html(
             data: resolveHtmlImageUrls(step.htmlContent!),
+            extensions: lessonHtmlImageExtensions(),
             style: {
               'body': Style(
                 margin: Margins.zero,
@@ -74,6 +76,10 @@ class LessonContentTextCard extends StatelessWidget {
           const SizedBox(height: 16),
           Container(
             width: double.infinity,
+            // BR-5VYB78 — the frame keeps the card width, the picture inside it
+            // does not: it is centred and never drawn above 100 % of its own
+            // resolution.
+            alignment: Alignment.center,
             constraints: const BoxConstraints(maxHeight: 240),
             decoration: BoxDecoration(
               color: AppColors.background,
@@ -94,7 +100,6 @@ class LessonContentTextCard extends StatelessWidget {
                   : LessonNetworkImage(
                       rawUrl: step.content!.imageUrl!,
                       fit: BoxFit.contain,
-                      width: double.infinity,
                       errorWidget: Padding(
                         padding: const EdgeInsets.all(32),
                         child: Icon(
@@ -220,7 +225,7 @@ class LessonContentVideoCard extends StatelessWidget {
         Text(step.displayTitle, style: AppTextStyles.cardTitle()),
         const SizedBox(height: 16),
         if (videoUrl != null)
-          LessonVideoEmbed(videoUrl: videoUrl)
+          AppVideoEmbed(videoUrl: videoUrl)
         else
           Container(
             width: double.infinity,
@@ -510,7 +515,7 @@ class LessonContentQuizCard extends StatelessWidget {
                           const SizedBox(width: 12),
                           Expanded(
                             child: Text(
-                              option.text,
+                              option.label,
                               style: AppTextStyles.body(color: textColor),
                             ),
                           ),

@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
+import '../core/layout/breakpoints.dart';
+import '../widgets/auth_hero_scaffold.dart';
 
 class WelcomePage extends StatefulWidget {
   final VoidCallback onLoginSignUp;
@@ -78,7 +80,12 @@ class _WelcomePageState extends State<WelcomePage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ContentWidth(maxWidth: ContentWidth.reading, child: _buildPage(context));
+
+  /// This page has no wide layout yet, so [ContentWidth] keeps it at phone
+  /// width instead of stretching it across a monitor.
+  Widget _buildPage(BuildContext context) {
     return Scaffold(
       body: Container(
         width: double.infinity,
@@ -105,10 +112,7 @@ class _WelcomePageState extends State<WelcomePage> {
               left: 0,
               right: 0,
               child: Center(
-                child: Image.asset(
-                  'assets/images/login_logo.png',
-                  width: 276,
-                ),
+                child: buildAuthWordmark(width: 276),
               ),
             ),
             // White form container at bottom

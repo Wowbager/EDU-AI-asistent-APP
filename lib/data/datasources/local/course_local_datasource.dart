@@ -171,6 +171,26 @@ class CourseLocalDataSource {
             existingData['emoji'] = data['emoji'] ?? existingData['emoji'];
             existingData['description'] = data['description'] ?? existingData['description'];
             existingData['author'] = data['author'] ?? existingData['author'];
+            // Lesson unlocking is a course setting, not content: carry it over
+            // from the listing so flipping it in admin reaches students who
+            // already downloaded the course, without waiting for them to run
+            // the update (BR-K47WYE). Served by the courses.open_all_lessons
+            // column, so no JSON decode server-side.
+            if (data['open_all_lessons'] != null) {
+              existingData['open_all_lessons'] = data['open_all_lessons'];
+            }
+            // Same reasoning for only_once: marking a course as a test has to
+            // reach students who already downloaded it, otherwise its blocks
+            // keep feeding their practice queue (BR-E495XK). Also served by a
+            // column, so no JSON decode server-side.
+            if (data['only_once'] != null) {
+              existingData['only_once'] = data['only_once'];
+            }
+            // A cover swapped in admin should reach students who already
+            // downloaded the course, same as the emoji above (BR-YKYXC6).
+            if (data['header_image'] != null) {
+              existingData['header_image'] = data['header_image'];
+            }
             dataToStore = jsonEncode(existingData);
           }
         } catch (e, st) { silentLog('course_local_datasource', e, st); }

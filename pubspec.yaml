@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.17+19
+version: 1.0.25+35
 
 environment:
   sdk: ^3.10.0
@@ -55,6 +55,16 @@ dependencies:
   shared_preferences: ^2.2.2
   flutter_secure_storage: ^9.2.2
   package_info_plus: ^8.0.0
+
+  # Device tilt for mini games (Android/iOS/web; no desktop, which falls back
+  # to keyboard steering)
+  sensors_plus: ^6.1.1
+
+  # Camera / gallery for photographed answers to open questions (BR-P745Q8).
+  # image_picker rather than `camera`: it hands off to the platform's own
+  # capture UI, which is the only path that works on web and the only one that
+  # needs no per-platform preview, focus and orientation handling.
+  image_picker: ^1.1.2
 
   # Video playback
   video_player: ^2.9.2
@@ -98,11 +108,46 @@ dev_dependencies:
   drift_dev: ^2.15.0
   build_runner: ^2.4.8
 
+  # Expands branding/app_icon_1024.png into every launcher icon size.
+  flutter_launcher_icons: ^0.14.4
+
+# Launcher icons. Regenerate after `design/logo/generate.py` with:
+#   dart run flutter_launcher_icons
+#
+# `web` is deliberately off: the web icons are favicons rather than launcher
+# icons and use the single-letter mark on white, which this package cannot
+# express. design/logo/generate.py writes them (and manifest.json's icons
+# already point at those filenames).
+flutter_launcher_icons:
+  image_path: "branding/app_icon_1024.png"
+  android: true
+  ios: true
+  remove_alpha_ios: true
+  # Android 8+ masks the icon to the launcher's own shape. Supplying the
+  # adaptive pair puts that crop under our control instead of letting the
+  # system badge the flat icon.
+  adaptive_icon_background: "#F6F2FF"
+  adaptive_icon_foreground: "branding/app_icon_foreground_1024.png"
+  adaptive_icon_monochrome: "branding/app_icon_foreground_1024.png"
+  web:
+    generate: false
+  macos:
+    generate: true
+  windows:
+    generate: true
+
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 
 # The following section is specific to Flutter packages.
 flutter:
+
+  # Runner.xcodeproj has no FlutterGeneratedPluginSwiftPackage integration, so
+  # with SPM enabled (the default since Flutter 3.47) `pod install` skips the
+  # plugin pods and the iOS build fails with "Module '...' not found". Keep
+  # CocoaPods as the single plugin source until the project is SPM-migrated.
+  config:
+    enable-swift-package-manager: false
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
@@ -114,7 +159,11 @@ flutter:
     - assets/gpf/
     - assets/icons/
     - assets/images/
+    # Free starting outfit — bundled so a first launch with no connection
+    # still has an avatar to draw (the rest of the catalog comes from R2).
+    - assets/avatar/base/
     - assets/courses/
+    - assets/games/sky_jumper/
     - assets/themes/
     - assets/legal/cs/
     - assets/legal/en/

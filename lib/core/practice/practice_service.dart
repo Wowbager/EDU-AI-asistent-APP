@@ -1,6 +1,7 @@
 import '../../data/repositories/practice_repository.dart';
 import '../database/app_database.dart';
 import 'fsrs_bridge.dart';
+import 'practice_filter.dart';
 import 'queue_builder.dart';
 
 /// Holds the result of reviewing a single card.
@@ -51,10 +52,17 @@ class PracticeService {
   /// Loads the student's FSRS profile for daily limits (falling back to
   /// sensible defaults), fetches all active cards, and delegates to
   /// [QueueBuilder.buildQueue].
-  Future<List<PracticeCardsTableData>> generateQueue(String userId) async {
+  ///
+  /// [filter] is the student's chosen scope (subjects → areas). It is applied
+  /// inside the builder, before the daily caps, so a narrowed selection gets
+  /// the full daily allowance rather than the leftovers.
+  Future<List<PracticeCardsTableData>> generateQueue(
+    String userId, {
+    PracticeFilter filter = PracticeFilter.all,
+  }) async {
     final profile = await _repo.getFsrsProfile(userId);
     final todayCount = await _repo.getTodayReviewCount(userId);
-    final allCards = await _repo.getActiveCards(userId);
+    final allCards = await _repo.getPracticeableCards(userId);
 
     // Use profile limits if available; otherwise fall back to sane defaults.
     final dailyNewLimit = profile?.dailyNewLimit ?? 20;
@@ -65,6 +73,7 @@ class PracticeService {
       dailyNewLimit: dailyNewLimit,
       dailyReviewLimit: dailyReviewLimit,
       todayReviewCount: todayCount,
+      filter: filter,
     );
   }
 

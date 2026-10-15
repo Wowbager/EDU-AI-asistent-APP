@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../core/consent/minor_mode.dart';
 import '../core/providers/core_providers.dart';
+import '../core/services/classroom_join_service.dart';
 import '../core/sync/sync_queue.dart';
 import '../core/theme/app_theme.dart';
 import '../core/strings/app_strings.dart';
+import '../core/util/classroom_join_flow.dart';
 import '../widgets/page_header.dart';
+import '../widgets/user_avatar.dart';
+import '../core/layout/breakpoints.dart';
 
 /// Edit Profile page - update name, email is read-only.
 class EditProfilePage extends ConsumerStatefulWidget {
@@ -28,10 +33,29 @@ class _EditProfilePageState extends ConsumerState<EditProfilePage> {
   bool _isLoading = false;
   String? _errorMessage;
 
+  /// Classes the user is in (BR-3V2P22). Server-only — membership is not
+  /// mirrored into Drift, so this is null while loading and stays null
+  /// offline, in which case the list is simply not rendered.
+  List<ClassroomSummary>? _classrooms;
+
   @override
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: widget.userName);
+    _loadClassrooms();
+  }
+
+  Future<void> _loadClassrooms() async {
+    if (!canJoinClassroom(ref)) return;
+    final result = await ref.read(classroomJoinServiceProvider).myClassrooms();
+    if (!mounted || result.isFailure) return;
+    setState(() => _classrooms = result.data);
+  }
+
+  Future<void> _joinClassroom() async {
+    final result = await showClassroomCodeDialog(context, ref);
+    if (!mounted || result == null || !result.isJoined) return;
+    await _loadClassrooms();
   }
 
   @override
@@ -91,7 +115,13 @@ class _EditProfilePageState extends ConsumerState<EditProfilePage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ContentWidth(maxWidth: ContentWidth.reading, child: _buildPage(context));
+
+  /// This page has no wide layout yet, so [ContentWidth] keeps it at phone
+  /// width instead of stretching it across a monitor.
+  Widget _buildPage(BuildContext context) {
+    final isMinor = ref.watch(minorModeProvider);
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
@@ -109,10 +139,16 @@ class _EditProfilePageState extends ConsumerState<EditProfilePage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // Avatar — read-only here, the shop is where it is
+                    // assembled. It is on this screen because "my profile"
+                    // without the face the user built reads as someone else's
+                    // (BR-D6W3CR).
+                    _buildAvatar(),
+                    const SizedBox(height: 32),
                     // Name field
                     _buildLabel(AppStrings.editProfileNameLabel),
                     const SizedBox(height: 8),
-                    _buildNameField(),
+                    _buildNameField(isMinor),
                     const SizedBox(height: 24),
                     // Email field (read-only)
                     _buildLabel(AppStrings.editProfileEmailLabel),
@@ -123,6 +159,18 @@ class _EditProfilePageState extends ConsumerState<EditProfilePage> {
                       AppStrings.editProfileEmailReadonly,
                       style: AppTextStyles.meta(color: AppColors.primaryDark48),
                     ),
+                    // Classes (BR-3V2P22): the second place, next to the
+                    // library's code box, where a student who already has an
+                    // account can type the code their teacher handed out.
+                    // Hidden for guests and minors, who cannot join.
+                    if (canJoinClassroom(ref)) ...[
+                      const SizedBox(height: 24),
+                      _buildLabel(AppStrings.editProfileClassroomsLabel),
+                      const SizedBox(height: 8),
+                      _buildClassrooms(),
+                      const SizedBox(height: 12),
+                      _buildJoinClassroomButton(),
+                    ],
                     if (_errorMessage != null) ...[
                       const SizedBox(height: 24),
                       Container(
@@ -171,6 +219,15 @@ class _EditProfilePageState extends ConsumerState<EditProfilePage> {
     );
   }
 
+  Widget _buildAvatar() {
+    final avatarIndex =
+        ref.watch(activeUserStreamProvider).valueOrNull?.avatarIndex ?? 0;
+
+    return Center(
+      child: UserAvatar(size: 96, avatarIndex: avatarIndex),
+    );
+  }
+
   Widget _buildLabel(String text) {
     return Text(
       text,
@@ -178,7 +235,7 @@ class _EditProfilePageState extends ConsumerState<EditProfilePage> {
     );
   }
 
-  Widget _buildNameField() {
+  Widget _buildNameField(bool isMinor) {
     return Container(
       decoration: BoxDecoration(
         color: AppColors.surface,
@@ -187,12 +244,14 @@ class _EditProfilePageState extends ConsumerState<EditProfilePage> {
       ),
       child: TextField(
         controller: _nameController,
+        enabled: !isMinor,
         style: AppTextStyles.statSuffix(),
         decoration: InputDecoration(
           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
           border: InputBorder.none,
           hintText: AppStrings.editProfileNameHint,
           hintStyle: AppTextStyles.statSuffix(color: AppColors.primaryDark32),
+          helperText: isMinor ? AppStrings.minorNameLocked : null,
         ),
       ),
     );
@@ -222,6 +281,58 @@ class _EditProfilePageState extends ConsumerState<EditProfilePage> {
             color: AppColors.primaryDark32,
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildClassrooms() {
+    final classrooms = _classrooms;
+
+    // Still loading, or offline: show nothing rather than a wrong "none".
+    if (classrooms == null) return const SizedBox.shrink();
+
+    if (classrooms.isEmpty) {
+      return Text(
+        AppStrings.editProfileNoClassrooms,
+        style: AppTextStyles.meta(color: AppColors.primaryDark48),
+      );
+    }
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final c in classrooms)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: AppDecorations.radiusM,
+              boxShadow: AppDecorations.shadowLight,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.school_outlined, size: 18, color: AppColors.primary),
+                const SizedBox(width: 6),
+                Text(c.name, style: AppTextStyles.bodySmall()),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildJoinClassroomButton() {
+    return OutlinedButton.icon(
+      onPressed: _isLoading ? null : _joinClassroom,
+      icon: const Icon(Icons.add, size: 18),
+      label: Text(AppStrings.classroomJoinTitle),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: AppColors.primary,
+        side: BorderSide(color: AppColors.primary),
+        shape: RoundedRectangleBorder(borderRadius: AppDecorations.radiusM),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       ),
     );
   }

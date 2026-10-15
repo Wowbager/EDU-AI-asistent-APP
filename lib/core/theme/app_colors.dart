@@ -91,11 +91,45 @@ abstract final class AppColors {
   static Color get skillBlue => ThemeManager.colors.skillBlue;
 
   // ── Gradients ───────────────────────────────────────────────
+  static Color get authGradientTop => ThemeManager.colors.authGradientTop;
+  static Color get authGradientBottom =>
+      ThemeManager.colors.authGradientBottom;
+
+  /// Background of the auth flow — login, welcome, e-mail verification.
   static LinearGradient get authGradient => LinearGradient(
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
-    colors: [gradientPurple, primaryDark],
+    colors: [authGradientTop, authGradientBottom],
   );
+
+  /// Fill of the white login panel in the split-pane (desktop) auth layout.
+  ///
+  /// The design specifies white → #C6B3F2 on a diagonal. Hard-coding those hex
+  /// values would ignore the theme editor, so the far stop is derived by
+  /// blending [surface] towards [authGradientTop] — with the default theme that
+  /// lands on ≈#C6BDE0, within a hair of the drawn colour.
+  static LinearGradient get authPanelGradient => LinearGradient(
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+    colors: [surface, Color.lerp(surface, authGradientTop, 0.45)!],
+  );
+
+  /// [authPanelGradient] for a panel that carries body text.
+  ///
+  /// The auth panel wash ends around #C6BDE0 on the default theme, which is
+  /// fine under the headline type it was drawn for and far too dark under the
+  /// 12–13 px labels the shop puts on it — muted text landed at 2.2:1
+  /// (BR-YXSVVC). Same wash, stopped short of eating the text's contrast
+  /// budget.
+  static LinearGradient get contentPanelGradient => LinearGradient(
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+    colors: [surface, Color.lerp(surface, authGradientTop, 0.18)!],
+  );
+
+  /// The darkest point of [contentPanelGradient] — what text drawn on that
+  /// panel actually has to clear.
+  static Color get contentPanelEnd => contentPanelGradient.colors.last;
 
   static LinearGradient get bannerGradient => LinearGradient(
     colors: [bannerOrange, bannerOrangeDark],
@@ -113,6 +147,24 @@ abstract final class AppColors {
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
     colors: [orange, gradientGold],
+  );
+
+  // ── Bottom Nav Scrim ────────────────────────────────────────
+  static Color get navScrimTop => ThemeManager.colors.navScrimTop;
+  static Color get navScrimBottom => ThemeManager.colors.navScrimBottom;
+
+  /// Darkening scrim painted behind the floating bottom nav bar.
+  ///
+  /// The white bar sits over page content (`extendBody: true`) and on light
+  /// backgrounds the two blended together — see the ZČU design (Figma frame
+  /// 22-588): transparent at the top, 50% dark at the bottom.
+  static LinearGradient get bottomNavScrimGradient => LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [
+      navScrimTop.withValues(alpha: 0),
+      navScrimBottom.withValues(alpha: 0.5),
+    ],
   );
 
   // ── Orange Opacity Variants ───────────────────────────────

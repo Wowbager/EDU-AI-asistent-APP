@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/strings/app_strings.dart';
+import '../../core/ui/app_toast.dart';
 import '../../models/course_model.dart';
 import 'action_button.dart';
 
@@ -86,20 +87,7 @@ class LessonContentActionButtonsRow extends StatelessWidget {
                 onConfirm();
               }
             } else if (isCurrent && !block.isCompleted && !canConfirm) {
-              ScaffoldMessenger.of(context).clearSnackBars();
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(
-                    AppStrings.lessonSelectAnswerFirst,
-                    style: AppTextStyles.body(color: AppColors.primaryDark),
-                  ),
-                  backgroundColor: AppColors.orangeBg,
-                  behavior: SnackBarBehavior.floating,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: AppDecorations.radiusS),
-                  duration: const Duration(seconds: 2),
-                ),
-              );
+              showAppToast(context, AppStrings.lessonSelectAnswerFirst);
             }
           },
           child: _ConfirmCheck(
@@ -179,20 +167,7 @@ class LessonLegacyActionButtonsRow extends StatelessWidget {
               if (isCurrent && !block.isCompleted && canConfirm) {
                 onConfirm();
               } else if (isCurrent && !block.isCompleted && !canConfirm) {
-                ScaffoldMessenger.of(context).clearSnackBars();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      AppStrings.lessonSelectAnswerFirst,
-                      style: AppTextStyles.body(color: AppColors.primaryDark),
-                    ),
-                    backgroundColor: AppColors.orangeBg,
-                    behavior: SnackBarBehavior.floating,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: AppDecorations.radiusS),
-                    duration: const Duration(seconds: 2),
-                  ),
-                );
+                showAppToast(context, AppStrings.lessonSelectAnswerFirst);
               }
             },
             child: Container(

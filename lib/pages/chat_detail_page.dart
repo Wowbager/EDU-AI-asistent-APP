@@ -1,18 +1,17 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/connectivity/connectivity_service.dart';
-import '../core/database/app_database.dart';
 import '../core/providers/core_providers.dart';
 import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
-import '../data/repositories/chat_repository.dart';
 import '../models/chat_models.dart';
-import '../widgets/markdown_latex_widget.dart';
+import '../widgets/chat/chat_message_views.dart';
 import 'package:eduai/core/util/silent_log.dart';
+import '../core/layout/breakpoints.dart';
+import '../widgets/detail_shell.dart';
 
 /// Chat Detail Page for individual conversation
 class ChatDetailPage extends ConsumerStatefulWidget {
@@ -20,9 +19,25 @@ class ChatDetailPage extends ConsumerStatefulWidget {
   final String sessionTitle;
   final ChatPersona persona;
 
-  /// Optional context message to auto-send when opening chat from a block.
-  /// When set with an empty sessionId, creates a new session and sends this as first message.
+  /// Optional task context for a chat opened from a block. When set with an
+  /// empty sessionId, a new session is created and the conversation opens with
+  /// [initialQuestion].
+  ///
+  /// It rides along as the hidden `message_type: context` message, the same
+  /// channel the mentor sheet uses: the model reads the task, the transcript
+  /// shows the student's question. Sending the blob as the visible message put
+  /// the whole assembled context — image placeholders and all — in the
+  /// student's own bubble (BR-NAH3TR).
   final String? initialContext;
+
+  /// The visible opening message sent with [initialContext]. Defaults to a
+  /// plain request for help, which is what tapping "Zeptat se AI" means.
+  final String? initialQuestion;
+
+  /// Rendered as the right-hand pane of the wide chat layout instead of as a
+  /// pushed route: no back button (there is nothing to pop) and no status-bar
+  /// inset (the shell already handled it).
+  final bool embedded;
 
   const ChatDetailPage({
     super.key,
@@ -30,6 +45,8 @@ class ChatDetailPage extends ConsumerStatefulWidget {
     required this.sessionTitle,
     required this.persona,
     this.initialContext,
+    this.initialQuestion,
+    this.embedded = false,
   });
 
   @override
@@ -67,14 +84,17 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
       final user = await ref.read(activeUserProvider.future);
       if (user == null) return;
 
-      final session = await chatRepo.createSession(user.id, widget.persona);
+      final session = await chatRepo.createSession(user.id, widget.persona.id);
       _effectiveSessionId = session.id;
       if (mounted) setState(() {});
 
-      // Auto-send the context as first message
+      // Open the conversation with the student's question; the task context
+      // goes along hidden.
       if (widget.initialContext != null && _effectiveSessionId != null) {
-        _messageController.text = widget.initialContext!;
-        _sendMessage();
+        _sendMessage(
+          widget.initialQuestion ?? AppStrings.chatContextOpeningQuestion,
+          widget.initialContext,
+        );
       }
     } catch (e, st) { silentLog('chat_detail_page', e, st); }
   }
@@ -87,19 +107,31 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     super.dispose();
   }
 
-  void _sendMessage() {
-    if (_messageController.text.trim().isEmpty || _isStreaming) return;
+  /// Sends [question] when given — that is a follow-up button the student
+  /// tapped, or the opening question of a chat started from a block —
+  /// otherwise whatever is in the composer.
+  ///
+  /// [taskContext] is the hidden task context that goes with the opening
+  /// question only; the server keeps it out of the transcript.
+  void _sendMessage([String? question, String? taskContext]) {
+    final typed = question ?? _messageController.text;
+    if (typed.trim().isEmpty || _isStreaming || _isOffline) return;
     final sessionId = _effectiveSessionId;
     if (sessionId == null) return;
-    final content = _messageController.text.trim();
+    final content = typed.trim();
     _messageController.clear();
 
     setState(() => _isStreaming = true);
 
     final chatRepo = ref.read(chatRepositoryProvider);
-    _streamSub = chatRepo.sendMessage(sessionId, content).listen(
+    _streamSub =
+        chatRepo.sendMessage(sessionId, content, context: taskContext).listen(
       (event) {
         switch (event) {
+          case ChatStreamSuggestions():
+            // Stored by the repository; the bubble picks them up from the
+            // watch stream like the answer text does.
+            break;
           case ChatStreamToken():
             // Content is already updated in local DB by the repository
             // The watchMessages stream will trigger UI rebuild automatically
@@ -144,8 +176,36 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
     });
   }
 
+  /// The in-page back button. Only the phone route needs one: the wide layouts
+  /// get theirs from the shell's top bar (pushed) or have nothing to pop
+  /// (embedded pane).
+  bool get _showInPageBack =>
+      !widget.embedded && context.widthClass == WidthClass.compact;
+
   @override
   Widget build(BuildContext context) {
+    // Embedded: the pane is already the right size, so no clamp.
+    if (widget.embedded) return _buildPage(context);
+
+    if (context.widthClass == WidthClass.compact) {
+      return ContentWidth(
+        maxWidth: ContentWidth.reading,
+        child: _buildPage(context),
+      );
+    }
+
+    // Pushed on a wide viewport — from a lesson's "ask the AI" action, say.
+    // Without the shell this landed as a bare 720px column with no navigation,
+    // looking nothing like the two-pane chat tab.
+    return DetailShell(
+      backLabel: widget.sessionTitle.isNotEmpty
+          ? widget.sessionTitle
+          : widget.persona.displayName,
+      child: _buildPage(context),
+    );
+  }
+
+  Widget _buildPage(BuildContext context) {
     final sessionId = _effectiveSessionId ?? widget.sessionId;
     final messagesAsync =
         ref.watch(chatMessagesStreamProvider(sessionId));
@@ -191,13 +251,20 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
                       (_isStreaming ? 1 : 0), // +1 for date separator
                   itemBuilder: (context, index) {
                     if (index == 0) {
-                      return _buildDateSeparator(AppStrings.chatDetailToday);
+                      return ChatDateSeparator(
+                          label: AppStrings.chatDetailToday);
                     }
                     if (index > messages.length) {
-                      return _buildTypingIndicator();
+                      return ChatTypingIndicator(
+                          avatarEmoji: widget.persona.emoji);
                     }
-                    final message = messages[index - 1];
-                    return _buildMessageBubble(message);
+                    return ChatMessageBubble(
+                      message: messages[index - 1],
+                      avatarEmoji: widget.persona.emoji,
+                      onSuggestionTap: (_isStreaming || _isOffline)
+                          ? null
+                          : _sendMessage,
+                    );
                   },
                 );
               },
@@ -206,14 +273,23 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
             ),
           ),
           // Input bar
-          _buildInputBar(),
+          ChatComposer(
+            controller: _messageController,
+            hintText: AppStrings.chatDetailInputHint,
+            helperText: AppStrings.chatDetailHelperText,
+            canSend: !_isStreaming && _hasText && !_isOffline,
+            onSend: _sendMessage,
+            bottomPadding: MediaQuery.paddingOf(context).bottom,
+          ),
         ],
       ),
     );
   }
 
   Widget _buildHeader() {
-    final topPadding = MediaQuery.of(context).padding.top;
+    // Only the phone route sits under the status bar.
+    final topPadding =
+        _showInPageBack ? MediaQuery.paddingOf(context).top : 0.0;
     return Container(
       padding: EdgeInsets.only(
         left: 16,
@@ -227,7 +303,8 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
       ),
       child: Row(
         children: [
-          // Back button
+          // Back button — the wide layouts get theirs from the shell.
+          if (_showInPageBack)
           GestureDetector(
             onTap: () => Navigator.pop(context),
             child: Container(
@@ -294,702 +371,6 @@ class _ChatDetailPageState extends ConsumerState<ChatDetailPage> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildDateSeparator(String date) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      child: Row(
-        children: [
-          Expanded(
-            child: Container(
-              height: 1,
-              color: AppColors.primaryDark08,
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Text(
-              date,
-              style: AppTextStyles.caption(color: AppColors.primaryDark48),
-            ),
-          ),
-          Expanded(
-            child: Container(
-              height: 1,
-              color: AppColors.primaryDark08,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMessageBubble(ChatMessagesTableData message) {
-    final isUser = message.isFromUser;
-    final timeString =
-        '${message.createdAt.hour}:${message.createdAt.minute.toString().padLeft(2, '0')}';
-
-    // If assistant message with empty content, it's still streaming — skip rendering
-    if (!isUser && message.content.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        mainAxisAlignment:
-            isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (!isUser) ...[
-            // AI Avatar
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: AppColors.background,
-                shape: BoxShape.circle,
-              ),
-              child: Center(
-                child: Text(
-                  widget.persona.emoji,
-                  style: const TextStyle(fontSize: 16),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-          ],
-          // Message content
-          Flexible(
-            child: Column(
-              crossAxisAlignment:
-                  isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: isUser ? AppColors.background : AppColors.surface,
-                    borderRadius: BorderRadius.only(
-                      topLeft: const Radius.circular(20),
-                      topRight: const Radius.circular(20),
-                      bottomLeft: Radius.circular(isUser ? 20 : 4),
-                      bottomRight: Radius.circular(isUser ? 4 : 20),
-                    ),
-                    border: isUser
-                        ? Border.all(
-                            color: AppColors.primaryDark08,
-                          )
-                        : null,
-                    boxShadow: isUser ? null : AppDecorations.shadowLight,
-                  ),
-                  child: MarkdownLatexWidget(
-                    content: message.content,
-                    textStyle: AppTextStyles.bodySmall().copyWith(height: 1.5),
-                  ),
-                ),
-                const SizedBox(height: 6),
-                // Timestamp and actions
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      timeString,
-                      style: AppTextStyles.chipLabel(
-                          color: AppColors.primaryDark48),
-                    ),
-                    if (!isUser) ...[
-                      const SizedBox(width: 12),
-                      // Thumbs up
-                      GestureDetector(
-                        onTap: () {
-                          final chatRepo = ref.read(chatRepositoryProvider);
-                          chatRepo.submitFeedback(
-                            message.id,
-                            message.isLiked ? null : 'like',
-                            null,
-                          );
-                        },
-                        child: Icon(
-                          message.isLiked
-                              ? Icons.thumb_up
-                              : Icons.thumb_up_outlined,
-                          size: 16,
-                          color: message.isLiked
-                              ? AppColors.primaryDark
-                              : AppColors.primaryDark48,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      // Thumbs down
-                      GestureDetector(
-                        onTap: () => _showFeedbackBottomSheet(
-                          context,
-                          message.id,
-                        ),
-                        child: Icon(
-                          message.isDisliked
-                              ? Icons.thumb_down
-                              : Icons.thumb_down_outlined,
-                          size: 16,
-                          color: message.isDisliked
-                              ? AppColors.primaryDark
-                              : AppColors.primaryDark48,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ],
-            ),
-          ),
-          if (isUser) ...[
-            const SizedBox(width: 8),
-            // User Avatar
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: AppColors.cardLavender,
-                shape: BoxShape.circle,
-              ),
-              child: Center(
-                child: Icon(
-                  Icons.person,
-                  size: 18,
-                  color: AppColors.primaryDark,
-                ),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTypingIndicator() {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // AI Avatar
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: AppColors.background,
-              shape: BoxShape.circle,
-            ),
-            child: Center(
-              child: Text(
-                widget.persona.emoji,
-                style: const TextStyle(fontSize: 16),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          // Typing dots
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-            decoration: BoxDecoration(
-              color: AppColors.surface,
-              borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(20),
-                topRight: Radius.circular(20),
-                bottomLeft: Radius.circular(4),
-                bottomRight: Radius.circular(20),
-              ),
-              boxShadow: AppDecorations.shadowLight,
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _buildTypingDot(0),
-                const SizedBox(width: 4),
-                _buildTypingDot(1),
-                const SizedBox(width: 4),
-                _buildTypingDot(2),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildTypingDot(int index) {
-    return TweenAnimationBuilder<double>(
-      tween: Tween(begin: 0.0, end: 1.0),
-      duration: Duration(milliseconds: 600 + (index * 200)),
-      builder: (context, value, child) {
-        return Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(
-            color: AppColors.primaryDark48,
-            shape: BoxShape.circle,
-          ),
-        );
-      },
-    );
-  }
-
-  void _showFeedbackBottomSheet(BuildContext context, String messageId) {
-    final chatRepo = ref.read(chatRepositoryProvider);
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => FeedbackBottomSheet(
-        messageId: messageId,
-        chatRepo: chatRepo,
-      ),
-    );
-  }
-
-  Widget _buildInputBar() {
-    return Container(
-      padding: EdgeInsets.only(
-        left: 16,
-        right: 16,
-        top: 12,
-        bottom: MediaQuery.of(context).padding.bottom + 12,
-      ),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.primaryDark08,
-            blurRadius: 16,
-            offset: const Offset(0, -4),
-          ),
-        ],
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              // Text input
-              Expanded(
-                child: Container(
-                  constraints: const BoxConstraints(minHeight: 44),
-                  decoration: BoxDecoration(
-                    color: AppColors.background,
-                    borderRadius: AppDecorations.radiusS,
-                  ),
-                  child: Focus(
-                    onKeyEvent: (node, event) {
-                      if (event is KeyDownEvent &&
-                          event.logicalKey == LogicalKeyboardKey.enter &&
-                          !HardwareKeyboard.instance.isShiftPressed) {
-                        if (!_isStreaming && _hasText && !_isOffline) {
-                          _sendMessage();
-                        }
-                        return KeyEventResult.handled;
-                      }
-                      return KeyEventResult.ignored;
-                    },
-                    child: TextField(
-                      controller: _messageController,
-                      minLines: 1,
-                      maxLines: 5,
-                      textInputAction: TextInputAction.newline,
-                      decoration: InputDecoration(
-                        hintText: AppStrings.chatDetailInputHint,
-                        hintStyle: AppTextStyles.bodySmall(
-                            color: AppColors.primaryDark48),
-                        border: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
-                      ),
-                      style: AppTextStyles.bodySmall(),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              // Send button
-              GestureDetector(
-                onTap: (_isStreaming || !_hasText || _isOffline) ? null : _sendMessage,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    color: (_isStreaming || !_hasText || _isOffline)
-                        ? AppColors.primaryDark32
-                        : AppColors.primaryDark,
-                    borderRadius: AppDecorations.radiusS,
-                  ),
-                  child: const Icon(
-                    Icons.send,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          // Helper text
-          Text(
-            AppStrings.chatDetailHelperText,
-            style: AppTextStyles.chipLabel(color: AppColors.primaryDark48),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Feedback reason options
-enum FeedbackReason {
-  incorrectInfo,
-  incompleteAnswer,
-  unclearExplanation,
-  inappropriateAnswer,
-  otherReason,
-}
-
-/// Feedback Bottom Sheet Widget
-class FeedbackBottomSheet extends StatefulWidget {
-  final String messageId;
-  final ChatRepository chatRepo;
-
-  const FeedbackBottomSheet({
-    super.key,
-    required this.messageId,
-    required this.chatRepo,
-  });
-
-  @override
-  State<FeedbackBottomSheet> createState() => _FeedbackBottomSheetState();
-}
-
-class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
-  FeedbackReason? _selectedReason;
-  final TextEditingController _detailsController = TextEditingController();
-
-  @override
-  void dispose() {
-    _detailsController.dispose();
-    super.dispose();
-  }
-
-  String _getReasonEmoji(FeedbackReason reason) {
-    switch (reason) {
-      case FeedbackReason.incorrectInfo:
-        return '❌';
-      case FeedbackReason.incompleteAnswer:
-        return '📝';
-      case FeedbackReason.unclearExplanation:
-        return '❓';
-      case FeedbackReason.inappropriateAnswer:
-        return '⚠️';
-      case FeedbackReason.otherReason:
-        return '💬';
-    }
-  }
-
-  String _getReasonText(FeedbackReason reason) {
-    switch (reason) {
-      case FeedbackReason.incorrectInfo:
-        return AppStrings.chatFeedbackIncorrect;
-      case FeedbackReason.incompleteAnswer:
-        return AppStrings.chatFeedbackIncomplete;
-      case FeedbackReason.unclearExplanation:
-        return AppStrings.chatFeedbackUnclear;
-      case FeedbackReason.inappropriateAnswer:
-        return AppStrings.chatFeedbackInappropriate;
-      case FeedbackReason.otherReason:
-        return AppStrings.chatFeedbackOther;
-    }
-  }
-
-  void _submitFeedback() {
-    if (_selectedReason == null) return;
-
-    widget.chatRepo.submitFeedback(
-      widget.messageId,
-      'dislike',
-      _getReasonText(_selectedReason!),
-    );
-    Navigator.pop(context);
-
-    // Show confirmation snackbar
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          AppStrings.chatFeedbackThanks,
-          style: AppTextStyles.bodySmall(),
-        ),
-        backgroundColor: AppColors.success,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-          borderRadius: AppDecorations.radiusS,
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: EdgeInsets.only(
-        bottom: MediaQuery.of(context).viewInsets.bottom,
-      ),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.only(
-          topLeft: Radius.circular(24),
-          topRight: Radius.circular(24),
-        ),
-      ),
-      child: SingleChildScrollView(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Header
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Thumbs down icon
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: AppColors.background,
-                      borderRadius: AppDecorations.radiusS,
-                    ),
-                    child: const Center(
-                      child: Text(
-                        '👎',
-                        style: TextStyle(fontSize: 24),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  // Title and subtitle
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          AppStrings.chatFeedbackTitle,
-                          style: AppTextStyles.cardTitle(),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          AppStrings.chatFeedbackSubtitle,
-                          style: AppTextStyles.meta(
-                              color: AppColors.primaryDark64),
-                        ),
-                      ],
-                    ),
-                  ),
-                  // Close button
-                  GestureDetector(
-                    onTap: () => Navigator.pop(context),
-                    child: Icon(
-                      Icons.close,
-                      color: AppColors.primaryDark48,
-                      size: 24,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-
-              // Reason label
-              Row(
-                children: [
-                  Text(
-                    AppStrings.chatFeedbackSelectReason,
-                    style: AppTextStyles.labelMedium(),
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    '*',
-                    style: AppTextStyles.labelMedium(color: AppColors.error),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-
-              // Reason options
-              ...FeedbackReason.values
-                  .map((reason) => _buildReasonOption(reason)),
-
-              const SizedBox(height: 24),
-
-              // Additional details label
-              Text(
-                AppStrings.chatFeedbackDetails,
-                style: AppTextStyles.labelMedium(),
-              ),
-              const SizedBox(height: 12),
-
-              // Text area
-              Container(
-                decoration: BoxDecoration(
-                  border: Border.all(
-                    color: AppColors.primaryDark16,
-                  ),
-                  borderRadius: AppDecorations.radiusS,
-                ),
-                child: TextField(
-                  controller: _detailsController,
-                  maxLines: 4,
-                  maxLength: 500,
-                  decoration: InputDecoration(
-                    hintText: AppStrings.chatFeedbackHint,
-                    hintStyle: AppTextStyles.bodySmall(
-                        color: AppColors.primaryDark48),
-                    border: InputBorder.none,
-                    contentPadding: const EdgeInsets.all(16),
-                    counterStyle: AppTextStyles.caption(
-                        color: AppColors.primaryDark48),
-                  ),
-                  style: AppTextStyles.bodySmall(),
-                ),
-              ),
-
-              const SizedBox(height: 24),
-
-              // Action buttons
-              Row(
-                children: [
-                  // Cancel button
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () => Navigator.pop(context),
-                      child: Container(
-                        height: 48,
-                        decoration: BoxDecoration(
-                          border: Border.all(
-                            color: AppColors.primaryDark16,
-                          ),
-                          borderRadius: AppDecorations.radiusS,
-                        ),
-                        child: Center(
-                          child: Text(
-                            AppStrings.chatFeedbackCancel,
-                            style: AppTextStyles.labelMedium(),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  // Submit button
-                  Expanded(
-                    child: GestureDetector(
-                      onTap:
-                          _selectedReason != null ? _submitFeedback : null,
-                      child: Container(
-                        height: 48,
-                        decoration: BoxDecoration(
-                          color: _selectedReason != null
-                              ? AppColors.primaryDark
-                              : AppColors.primaryDark32,
-                          borderRadius: AppDecorations.radiusS,
-                        ),
-                        child: Center(
-                          child: Text(
-                            AppStrings.chatFeedbackSubmit,
-                            style:
-                                AppTextStyles.labelMedium(color: Colors.white),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-
-              // Bottom safe area
-              SizedBox(height: MediaQuery.of(context).padding.bottom),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildReasonOption(FeedbackReason reason) {
-    final isSelected = _selectedReason == reason;
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: GestureDetector(
-        onTap: () {
-          setState(() {
-            _selectedReason = reason;
-          });
-        },
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            border: Border.all(
-              color: isSelected
-                  ? AppColors.primaryDark
-                  : AppColors.primaryDark16,
-              width: isSelected ? 2 : 1,
-            ),
-            borderRadius: AppDecorations.radiusS,
-          ),
-          child: Row(
-            children: [
-              // Radio button
-              Container(
-                width: 20,
-                height: 20,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: isSelected
-                        ? AppColors.primaryDark
-                        : AppColors.primaryDark32,
-                    width: 2,
-                  ),
-                ),
-                child: isSelected
-                    ? Center(
-                        child: Container(
-                          width: 10,
-                          height: 10,
-                          decoration: BoxDecoration(
-                            color: AppColors.primaryDark,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      )
-                    : null,
-              ),
-              const SizedBox(width: 12),
-              // Emoji
-              Text(
-                _getReasonEmoji(reason),
-                style: const TextStyle(fontSize: 18),
-              ),
-              const SizedBox(width: 12),
-              // Text
-              Text(
-                _getReasonText(reason),
-                style: AppTextStyles.bodySmall(),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }

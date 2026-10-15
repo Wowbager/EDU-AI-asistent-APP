@@ -6,6 +6,8 @@
     "primaryDark": "#3C315B",
     "background": "#F6F2FF",
     "gradientPurple": "#7F68C1",
+    "authGradientTop": "#806DB9",
+    "authGradientBottom": "#4B378B",
     "surface": "#FFFFFF",
 
     "success": "#2FBE87",
@@ -57,7 +59,10 @@
     "skillRed": "#FFE4E4",
     "skillBlue": "#E4E4FF",
 
-    "gradientGold": "#FFD000"
+    "gradientGold": "#FFD000",
+
+    "navScrimTop": "#857FA4",
+    "navScrimBottom": "#272145"
   },
   "typography": {
     "headingFont": "Nunito",

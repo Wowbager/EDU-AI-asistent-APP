@@ -19,6 +19,12 @@ class UserStats {
   final DateTime? lastStreakDate;
   final DateTime? dailyXpDate;
   final int dailyXpAmount;
+
+  /// EDUX coins earned over the account's lifetime (BR-HK9828).
+  final int coinsEarned;
+
+  /// EDUX coins still available to spend.
+  final int coinsBalance;
   final SyncStatus syncStatus;
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -35,6 +41,8 @@ class UserStats {
     this.lastStreakDate,
     this.dailyXpDate,
     this.dailyXpAmount = 0,
+    this.coinsEarned = 0,
+    this.coinsBalance = 0,
     required this.syncStatus,
     required this.createdAt,
     required this.updatedAt,
@@ -53,6 +61,8 @@ class UserStats {
       lastStreakDate: data.lastStreakDate,
       dailyXpDate: data.dailyXpDate,
       dailyXpAmount: data.dailyXpAmount,
+      coinsEarned: data.coinsEarned,
+      coinsBalance: data.coinsBalance,
       syncStatus: SyncStatusExtension.fromInt(data.syncStatus),
       createdAt: data.createdAt,
       updatedAt: data.updatedAt,
@@ -145,6 +155,8 @@ class UserStatsRepository {
       coursesCount: remoteStats.coursesCount,
       streakDays: remoteStats.streakDays,
       achievementsCount: remoteStats.achievementsCount,
+      coinsEarned: remoteStats.coinsEarned,
+      coinsBalance: remoteStats.coinsBalance,
       lastStreakDate: remoteStats.lastStreakDate,
       serverUpdatedAt: remoteStats.updatedAt,
       existingLocalId: existingLocal?.id,
@@ -313,6 +325,47 @@ class UserStatsRepository {
     );
 
     return effectiveXp;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Coin Operations (BR-HK9828)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Credit EDUX coins earned on the device.
+  ///
+  /// Local first, like XP: a coin earned on a train has to be visible before
+  /// the device is back online. The queued payload carries absolute totals
+  /// rather than a delta, so a retry that lands twice credits once.
+  ///
+  /// Coins collected in a mini game do *not* come through here — the server
+  /// banks those when the run reports its score, because it is the only party
+  /// that knows the run was legitimate.
+  Future<void> awardCoins({
+    required String userId,
+    required int amount,
+  }) async {
+    if (amount <= 0) return;
+
+    final stats = await _localDataSource.getOrCreateStats(userId);
+
+    final newEarned = stats.coinsEarned + amount;
+    final newBalance = stats.coinsBalance + amount;
+
+    await _localDataSource.updateCoins(
+      localId: stats.id,
+      coinsEarned: newEarned,
+      coinsBalance: newBalance,
+    );
+
+    await _syncQueue.enqueue(
+      tableName: 'user_stats',
+      recordId: stats.id,
+      operation: SyncOperation.update,
+      payload: {
+        'coins_earned': newEarned,
+        'coins_balance': newBalance,
+      },
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

@@ -39,6 +39,14 @@ class UserStatsTable extends Table {
   /// XP earned on the [dailyXpDate] (resets each new day).
   IntColumn get dailyXpAmount => integer().withDefault(const Constant(0))();
 
+  /// EDUX coins earned over the account's lifetime — the number the
+  /// Achievements screen shows. Only ever grows (BR-HK9828).
+  IntColumn get coinsEarned => integer().withDefault(const Constant(0))();
+
+  /// EDUX coins still available to spend. Tracked apart from [coinsEarned] so
+  /// buying something in the shop cannot shrink what the student has earned.
+  IntColumn get coinsBalance => integer().withDefault(const Constant(0))();
+
   /// Sync status: 0=synced, 1=pending, 2=conflict.
   IntColumn get syncStatus => integer().withDefault(const Constant(0))();
 

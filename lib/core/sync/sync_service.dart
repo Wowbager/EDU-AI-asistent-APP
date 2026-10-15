@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
@@ -54,15 +55,22 @@ class SyncService {
   /// Interval for periodic sync checks (when on WiFi).
   static const Duration periodicSyncInterval = Duration(minutes: 15);
 
+  /// Downloads a course's full JSON into the local DB, keyed on the local
+  /// course row id. Injected (rather than constructing a CourseRepository here)
+  /// so the sync engine stays testable and free of data-source wiring.
+  final Future<bool> Function(String localCourseId)? _fetchCourseContent;
+
   SyncService({
     required AppDatabase db,
     required ApiClient apiClient,
     required ConnectivityService connectivity,
     SyncQueue? syncQueue,
+    Future<bool> Function(String localCourseId)? fetchCourseContent,
   })  : _db = db,
         _apiClient = apiClient,
         _connectivity = connectivity,
-        _syncQueue = syncQueue ?? SyncQueue(db);
+        _syncQueue = syncQueue ?? SyncQueue(db),
+        _fetchCourseContent = fetchCourseContent;
 
   /// Stream of sync state changes.
   Stream<SyncState> get stateStream => _stateController.stream;
@@ -128,6 +136,10 @@ class SyncService {
       // 2. Pull remote updates.
       await _pullUpdates();
 
+      // 2b. Materialize the content of courses the account is enrolled in but
+      // this device has never downloaded (BR-ZBJ99Z).
+      await _fetchMissingEnrolledCourseContent();
+
       // 3. Reconcile FSRS practice cards (pull → seed → push). Runs after
       // _pullUpdates so course content and enrollments are present locally
       // (BR-WR4C8P).
@@ -150,6 +162,78 @@ class SyncService {
       sync();
     }
   }
+
+  /// Download the full course JSON for every enrolled course this device only
+  /// knows as catalog metadata.
+  ///
+  /// Enrollments arrive from the server on any device, but the content itself
+  /// is only fetched when the user taps "download" on THIS device. Everything
+  /// that resolves a practice card needs that content — seeding, the dashboard
+  /// queue and the playable-block lookup all skip courses without it — so a
+  /// second device showed an empty "Procvičování" until the course was manually
+  /// downloaded, which looked like the account wasn't syncing (BR-ZBJ99Z).
+  ///
+  /// Best-effort: online-only, one attempt per course per sync, failures are
+  /// logged and swallowed.
+  Future<void> _fetchMissingEnrolledCourseContent() async {
+    final fetch = _fetchCourseContent;
+    if (fetch == null || !_apiClient.isAuthenticated) return;
+
+    try {
+      final activeUser = await _db.getActiveUser();
+      if (activeUser == null) return;
+
+      final enrollments = await _db.getUserCourses(activeUser.id);
+      final seen = <String>{};
+      for (final enrollment in enrollments) {
+        final row = await _db.getCourseById(enrollment.courseId) ??
+            await _db.getCourseByFieldCourseId(enrollment.courseId);
+        if (row == null) continue;
+        if (!seen.add(row.id)) continue;
+        if (_hasCourseContent(row.data)) continue;
+        await fetch(row.id);
+      }
+    } catch (e, st) {
+      silentLog('sync:fetch_enrolled_course_content', e, st);
+    }
+  }
+
+  /// Whether a stored course payload carries real lesson content (as opposed to
+  /// the catalog metadata stub the course list pull writes).
+  bool _hasCourseContent(String rawData) {
+    if (rawData.isEmpty) return false;
+    try {
+      final data = jsonDecode(rawData);
+      if (data is! Map<String, dynamic>) return false;
+      final lessons = data['lessons'];
+      if (lessons is! List || lessons.isEmpty) return false;
+      final blocks = data['blocks'];
+      return blocks is List && blocks.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Test-only hook that drives the user-course reconciliation in isolation,
+  /// exercising the exact private path the sync engine runs (BR-SNUYF7 —
+  /// enrollments for courses missing from the local catalog, e.g. private
+  /// courses, must materialize rather than be dropped).
+  @visibleForTesting
+  Future<void> debugPullUserCourseUpdates() => _pullUserCourseUpdates();
+
+  /// Test-only hook for the task calibration pull (BR-697NCA).
+  @visibleForTesting
+  Future<void> debugPullBlockStats() => _pullBlockStats();
+
+  /// Test-only hook that pushes a single queued bookmark operation, so the
+  /// wire payload can be asserted on (BR-952UKZ — the course reference must
+  /// leave the device as a server course code, never a local Drift row id).
+  @visibleForTesting
+  Future<bool> debugProcessBookmarkOperation(
+    SyncOperation operation,
+    Map<String, dynamic> payload,
+  ) =>
+      _processBookmarkOperation('debug', operation, payload);
 
   /// Refresh the cached GPF vector dimension labels from the backend. Requires
   /// auth; failures are swallowed so the bundled-asset / cached labels keep
@@ -219,7 +303,7 @@ class SyncService {
     try {
       await _pullPracticeCards(activeUser.id);
       await _seedPracticeCards(activeUser.id);
-      await _pushPracticeCards();
+      await _pushPracticeCards(activeUser.id);
     } catch (e, st) {
       silentLog('sync:practice_cards', e, st);
     }
@@ -228,6 +312,25 @@ class SyncService {
   DateTime? _parseIsoDate(dynamic value) {
     if (value is! String || value.isEmpty) return null;
     return DateTime.tryParse(value);
+  }
+
+  /// Resolve a card's local course reference (a Drift row id such as
+  /// `local-<uuid>`) to the server-facing course code (courses.course_id).
+  /// Cards created by seeding/bookmarks store the local row id; pushing that
+  /// raw would fill the server with ids no other device or the admin can map
+  /// back to a course. Falls back to the stored value when it already is a
+  /// course code (no local row with that id).
+  Future<String> _resolveCourseCode(
+    String cardCourseId,
+    Map<String, String> cache,
+  ) async {
+    final cached = cache[cardCourseId];
+    if (cached != null) return cached;
+    final row = await _db.getCourseById(cardCourseId);
+    final code =
+        (row != null && row.courseId.isNotEmpty) ? row.courseId : cardCourseId;
+    cache[cardCourseId] = code;
+    return code;
   }
 
   /// Pull the account's practice cards and upsert them locally, keyed on
@@ -253,11 +356,25 @@ class SyncService {
         continue;
       }
 
+      // Server stores the course code; local cards reference the Drift course
+      // row id. Translate back so the queue's course grouping keeps working.
+      // Legacy rows pushed before the translation existed may carry a local
+      // row id — getCourseById covers those.
+      final remoteCourseId = remote['course_id'] as String? ?? '';
+      final localCourseRow = remoteCourseId.isEmpty
+          ? null
+          : (await _db.getCourseByFieldCourseId(remoteCourseId) ??
+              await _db.getCourseById(remoteCourseId));
+
       await _db.upsertPracticeCard(PracticeCardsTableCompanion(
         id: Value(existing?.id ?? _generateLocalId()),
         serverId: Value(remote['id']?.toString()),
         userId: Value(userId),
-        courseId: Value(remote['course_id'] as String? ?? ''),
+        courseId: Value(
+          existing?.courseId.isNotEmpty == true
+              ? existing!.courseId
+              : (localCourseRow?.id ?? remoteCourseId),
+        ),
         lessonId: Value(remote['lesson_id'] as String? ?? ''),
         blockId: Value(blockId),
         sourceType: Value(remote['source_type'] as String? ?? 'lesson'),
@@ -311,40 +428,52 @@ class SyncService {
   /// then mark the pushed rows synced. Cards missing any server-required
   /// identifier are skipped (they can't be represented server-side and would
   /// otherwise 422 the whole batch).
-  Future<void> _pushPracticeCards() async {
+  Future<void> _pushPracticeCards(String userId) async {
     final pending = await _db.getPendingSyncPracticeCards();
     if (pending.isEmpty) return;
 
+    // Only the active user's cards — the POST is attributed to the
+    // authenticated account, so pushing another local user's rows would
+    // inflate that account's deck server-side.
+    //
+    // lessonId is deliberately NOT required: auto-bookmarking a wrong quiz
+    // answer has no lesson context, and dropping those cards here left them
+    // pending forever — which also made _pullPracticeCards skip them (pending
+    // rows are protected), so they never left the device (BR-ZBJ99Z).
     final pushable = pending
         .where((c) =>
+            c.userId == userId &&
             c.courseId.isNotEmpty &&
-            c.lessonId.isNotEmpty &&
             c.blockId.isNotEmpty)
         .toList();
     if (pushable.isEmpty) return;
 
-    final cards = pushable
-        .map((c) => {
-              'course_id': c.courseId,
-              'lesson_id': c.lessonId,
-              'block_id': c.blockId,
-              'source_type': c.sourceType,
-              'state': c.state,
-              'due_date': c.dueDate.toUtc().toIso8601String(),
-              'stability': c.stability,
-              'difficulty': c.difficulty,
-              'reps': c.reps,
-              'lapses': c.lapses,
-              'scheduled_days': c.scheduledDays,
-              'elapsed_days': c.elapsedDays,
-              if (c.lastReview != null)
-                'last_review': c.lastReview!.toUtc().toIso8601String(),
-              'weight': c.weight,
-              'avg_time_sec': c.avgTimeSec,
-              if (c.skipCondition != null) 'skip_condition': c.skipCondition,
-              'is_active': c.isActive,
-            })
-        .toList();
+    // Translate local course row ids to server course codes so the server
+    // (and admin) can attribute cards to courses.
+    final courseCodeCache = <String, String>{};
+    final cards = <Map<String, dynamic>>[];
+    for (final c in pushable) {
+      cards.add({
+        'course_id': await _resolveCourseCode(c.courseId, courseCodeCache),
+        'lesson_id': c.lessonId,
+        'block_id': c.blockId,
+        'source_type': c.sourceType,
+        'state': c.state,
+        'due_date': c.dueDate.toUtc().toIso8601String(),
+        'stability': c.stability,
+        'difficulty': c.difficulty,
+        'reps': c.reps,
+        'lapses': c.lapses,
+        'scheduled_days': c.scheduledDays,
+        'elapsed_days': c.elapsedDays,
+        if (c.lastReview != null)
+          'last_review': c.lastReview!.toUtc().toIso8601String(),
+        'weight': c.weight,
+        'avg_time_sec': c.avgTimeSec,
+        if (c.skipCondition != null) 'skip_condition': c.skipCondition,
+        'is_active': c.isActive,
+      });
+    }
 
     final result = await _apiClient.post<Map<String, dynamic>>(
       ApiEndpoints.userPracticeCards,
@@ -443,6 +572,8 @@ class SyncService {
       await _db.updateChatSessionSyncStatus(recordId, 'synced');
     } else if (tableName == 'chat_messages') {
       await _db.updateChatMessageSyncStatus(recordId, 'synced');
+    } else if (tableName == 'user_avatar') {
+      await _db.updateUserAvatarSyncStatus(recordId, SyncStatus.synced.toInt());
     }
   }
 
@@ -461,7 +592,63 @@ class SyncService {
     'elo_interactions': _processEloInteractionOperation,
     'chat_messages': _processChatMessageOperation,
     'chat_sessions': _processChatSessionOperation,
+    'user_avatar': _processUserAvatarOperation,
+    'open_answers': _processOpenAnswerOperation,
   };
+
+  /// Push one evaluated open answer (BR-P745Q8).
+  ///
+  /// BR-FFVVYR posted these straight from the widget and swallowed the error,
+  /// so an answer given on a train never reached the teacher at all. Routing
+  /// them through the queue is what makes "the student's attempt is not lost"
+  /// true rather than aspirational.
+  ///
+  /// The queue key is the attempt's `client_uuid`, which is minted where the
+  /// answer is given, not where it is sent. Two consequences, both wanted:
+  /// a replay updates the same row server-side instead of duplicating it, and
+  /// a retry — which is a new uuid — queues as its own entry rather than
+  /// merging into the attempt it followed.
+  Future<bool> _processOpenAnswerOperation(
+    String localId,
+    SyncOperation operation,
+    Map<String, dynamic> payload,
+  ) async {
+    if (operation != SyncOperation.create) return false;
+
+    final result = await _apiClient.post<Map<String, dynamic>>(
+      ApiEndpoints.openAnswers,
+      data: {
+        'answers': [payload],
+      },
+    );
+
+    return result.isSuccess;
+  }
+
+  /// Push a queued outfit change (BR-7JRBCN).
+  ///
+  /// The queue entry carries the whole slot map, not a delta, so replaying an
+  /// old entry can only ever restore a state the user actually chose — and the
+  /// server validates ownership, so a stale entry naming an item the account
+  /// lost is rejected rather than applied.
+  Future<bool> _processUserAvatarOperation(
+    String localId,
+    SyncOperation operation,
+    Map<String, dynamic> payload,
+  ) async {
+    if (operation != SyncOperation.update) return false;
+
+    final result = await _apiClient.put<Map<String, dynamic>>(
+      ApiEndpoints.userAvatar,
+      data: payload,
+    );
+
+    if (result.isSuccess) {
+      await _db.updateUserAvatarSyncStatus(localId, SyncStatus.synced.toInt());
+      return true;
+    }
+    return false;
+  }
 
   /// Process a single sync queue operation using the handler registry.
   Future<bool> _processOperation(SyncQueueTableData op) async {
@@ -745,17 +932,39 @@ class SyncService {
     return result.isSuccess;
   }
 
+  /// Course-code cache for bookmark pushes, shared across operations so a
+  /// batch of bookmarks for one course costs a single lookup.
+  final Map<String, String> _bookmarkCourseCodes = {};
+
   /// Process bookmark sync operations.
+  ///
+  /// Bookmarks are enqueued with whatever course reference the UI held — for
+  /// in-app bookmarking that's the local Drift row id (`local-<uuid>`), which
+  /// is per-device and unmappable anywhere else, so the server (and the admin
+  /// panel reading it) ends up labelling groups with an internal id instead of
+  /// the course (BR-952UKZ). Translate to the server course code on the wire,
+  /// exactly as the practice-card push does (BR-ZBJ99Z).
+  ///
+  /// The *queued* payload deliberately keeps the local id: `_pendingBookmarkKeys`
+  /// diffs it against local bookmark rows to protect un-pushed creates from the
+  /// pull's full-replace (BR-YRT5ZM), and those rows are keyed locally.
   Future<bool> _processBookmarkOperation(
     String localId,
     SyncOperation operation,
     Map<String, dynamic> payload,
   ) async {
+    final wire = Map<String, dynamic>.from(payload);
+    final courseId = payload['course_id'] as String? ?? '';
+    if (courseId.isNotEmpty) {
+      wire['course_id'] =
+          await _resolveCourseCode(courseId, _bookmarkCourseCodes);
+    }
+
     switch (operation) {
       case SyncOperation.create:
         final result = await _apiClient.post<Map<String, dynamic>>(
           ApiEndpoints.userBookmarks,
-          data: payload,
+          data: wire,
         );
         return result.isSuccess;
 
@@ -763,7 +972,7 @@ class SyncService {
         // POST to /delete endpoint with composite key — app doesn't have server IDs
         final result = await _apiClient.post<Map<String, dynamic>>(
           ApiEndpoints.userBookmarksDelete,
-          data: payload,
+          data: wire,
         );
         return result.isSuccess || result.statusCode == 404;
 
@@ -1031,7 +1240,46 @@ class SyncService {
       localCourse ??= courseStringId != null
           ? await _db.getCourseByFieldCourseId(courseStringId)
           : null;
-      if (localCourse == null) continue;
+
+      // Enrollment must always materialize. When the local catalog row is
+      // missing, create it from the embedded `course` payload instead of
+      // dropping the enrollment. This happens for PRIVATE courses (hidden from
+      // the student `/courses` catalog) and whenever the catalog pull ran
+      // unauthenticated or failed — after logout `clearAllData()` wipes the
+      // catalog, so on re-login those enrollments would silently vanish from
+      // the list even though the server still holds them with progress
+      // (BR-SNUYF7). `/user/courses` embeds the full course (incl. `data`), so
+      // we have everything needed to build a usable local row.
+      if (localCourse == null) {
+        final embedded = remoteData['course'] as Map<String, dynamic>?;
+        final embName = (embedded?['name'] as String?)?.trim();
+        final embCourseId =
+            (embedded?['course_id'] as String?)?.trim() ?? courseStringId;
+        if (embedded == null || embCourseId == null || embCourseId.isEmpty) {
+          continue; // nothing to identify the course by — skip.
+        }
+        final newLocalId = _generateLocalId();
+        await _db.upsertCourse(
+          CoursesTableCompanion(
+            id: Value(newLocalId),
+            serverId: Value(courseNumericId),
+            courseId: Value(embCourseId),
+            // Never store a hardcoded placeholder or the raw code as name —
+            // empty lets the UI resolve it later (mirrors _mergeServerCourse).
+            name: Value(embName?.isNotEmpty == true ? embName! : ''),
+            version: Value(embedded['version'] as int? ?? 1),
+            status: Value(embedded['status'] as String? ?? 'published'),
+            language: Value(embedded['language'] as String? ?? 'en'),
+            data: embedded['data'] != null
+                ? Value(jsonEncode(embedded['data']))
+                : const Value.absent(),
+            syncStatus: Value(SyncStatus.synced.toInt()),
+            updatedAt: Value(DateTime.now()),
+          ),
+        );
+        localCourse = await _db.getCourseById(newLocalId);
+        if (localCourse == null) continue;
+      }
 
       // Repair the local courses row from the embedded `course` payload —
       // this fixes legacy rows where `name` was poisoned with the raw code
@@ -1086,6 +1334,20 @@ class SyncService {
           // Re-read so the rest of the loop sees the patched row.
           localCourse = await _db.getCourseById(localCourse.id) ?? localCourse;
         }
+      }
+
+      // The course cover set in admin lives in the course JSON, which the
+      // metadata repair above and _mergeServerCourse never write. A bundled
+      // course (the onboarding guide) is seeded from a JSON with no cover and
+      // stays `pending`, so neither ever reached it either — and as every
+      // logout wipes the device, a child on a shared device always saw the
+      // emoji (BR-NZ7JUN). The embedded `data` is the stored course JSON, so
+      // take the cover from there. A student never edits a course, so the
+      // pending flag has nothing to protect here.
+      final embeddedData = embeddedCourse?['data'];
+      if (embeddedData is Map) {
+        localCourse =
+            await _carryCourseCover(localCourse, embeddedData['header_image']);
       }
 
       // Find existing local user course — first by server ID, then by
@@ -1400,14 +1662,43 @@ class SyncService {
       }
     }
 
-    // Remove local bookmarks not on server
+    // Remove local bookmarks not on server — but protect bookmarks that still
+    // have an un-pushed CREATE in the sync queue (e.g. created in a guest
+    // session moments before logging into an account, when the push hasn't
+    // landed yet). Without this guard the full-replace would drop them before
+    // _pushChanges ever uploads them to the now-active account (BR-YRT5ZM).
+    final pendingKeys = await _pendingBookmarkKeys();
     final localBookmarks = await _db.getAllBookmarks(activeUser.id);
     for (final local in localBookmarks) {
       final key = '${local.courseId}:${local.blockId}';
-      if (!serverKeys.contains(key)) {
+      if (!serverKeys.contains(key) && !pendingKeys.contains(key)) {
         await _db.removeBookmark(activeUser.id, local.courseId, local.blockId);
       }
     }
+  }
+
+  /// Keys ("courseId:blockId") of bookmarks that still have an un-pushed CREATE
+  /// in the sync queue. Used so [_pullBookmarkUpdates]'s full-replace never
+  /// deletes a bookmark the server hasn't received yet (BR-YRT5ZM).
+  Future<Set<String>> _pendingBookmarkKeys() async {
+    final ops = await _syncQueue.getPendingOperations(limit: 1000);
+    final keys = <String>{};
+    for (final op in ops) {
+      if (op.tableName_ != 'bookmarks') continue;
+      if (SyncOperationExtension.fromValue(op.operation) !=
+          SyncOperation.create) {
+        continue;
+      }
+      try {
+        final payload = jsonDecode(op.payload) as Map<String, dynamic>;
+        final courseId = payload['course_id'] as String? ?? '';
+        final blockId = payload['block_id'] as String? ?? '';
+        if (courseId.isNotEmpty && blockId.isNotEmpty) {
+          keys.add('$courseId:$blockId');
+        }
+      } catch (_) {}
+    }
+    return keys;
   }
 
   /// Pull gamification config from server (public endpoint).
@@ -1535,39 +1826,51 @@ class SyncService {
     } catch (e, st) { silentLog('sync_service', e, st); }
   }
 
-  /// Pull block stats (item_pocet + elo_vector) from the server for blocks
-  /// the user has interacted with. Caches locally for offline ELO computation.
+  /// Pull the server's task calibration (BR-697NCA) for every downloaded
+  /// course — the blocks the student can answer, the global quiz included.
+  /// Cached locally so an offline answer still runs on the last calibrated
+  /// difficulty; each course pulls only what changed since its newest row.
   Future<void> _pullBlockStats() async {
     try {
-      // Get all locally cached block IDs to request updates
-      final localStats = await _db.select(_db.blockStatsTable).get();
-      if (localStats.isEmpty) return;
-
-      final blockIds = localStats.map((r) => r.blockId).join(',');
-      final result = await _apiClient.get<Map<String, dynamic>>(
-        '${ApiEndpoints.blockStats}?block_ids=$blockIds',
-      );
-
-      if (result.isFailure || result.data == null) return;
-
-      final data = result.data!;
-      final stats = data['data'] as List<dynamic>?;
-      if (stats == null) return;
-
-      for (final stat in stats) {
-        if (stat is! Map<String, dynamic>) continue;
-        final blockId = stat['block_id'] as String?;
-        if (blockId == null) continue;
-
-        final itemPocet = stat['item_pocet'];
-        final eloVector = stat['elo_vector'];
-        if (itemPocet == null || eloVector == null) continue;
-
-        await _db.upsertBlockStats(
-          blockId: blockId,
-          itemPocet: jsonEncode(itemPocet),
-          eloVector: jsonEncode(eloVector),
+      for (final courseId in await _db.getDownloadedCourseIds()) {
+        final since = await _db.getBlockStatsCursor(courseId);
+        final result = await _apiClient.get<Map<String, dynamic>>(
+          ApiEndpoints.blockStats,
+          queryParameters: {
+            'course_id': courseId,
+            if (since != null) 'updated_since': since.toUtc().toIso8601String(),
+          },
         );
+
+        if (result.isFailure || result.data == null) continue;
+
+        final data = result.data!;
+        final meta = data['meta'];
+        if (meta is! Map || meta['task_calibration'] != true) {
+          // Nothing published — calibration switched off, or an API from
+          // before it. Drop the cache so the course's own elo_vector applies.
+          await _db.deleteBlockStatsForCourse(courseId);
+          continue;
+        }
+
+        final stats = data['data'] as List<dynamic>?;
+        if (stats == null) continue;
+
+        for (final stat in stats) {
+          if (stat is! Map<String, dynamic>) continue;
+          final blockId = stat['block_id'] as String?;
+          final updatedAt = DateTime.tryParse(stat['updated_at'] as String? ?? '');
+          if (blockId == null || updatedAt == null) continue;
+
+          await _db.upsertBlockStats(
+            blockId: blockId,
+            courseId: courseId,
+            // Null until the server has calibrated (or counted) anything.
+            itemPocet: jsonEncode(stat['item_pocet'] ?? const []),
+            eloVector: jsonEncode(stat['elo_vector'] ?? const []),
+            serverUpdatedAt: updatedAt,
+          );
+        }
       }
     } catch (e, st) { silentLog('sync_service', e, st); }
   }
@@ -1615,12 +1918,14 @@ class SyncService {
           id: Value(_generateLocalId()),
           serverId: Value(serverId),
           courseId: Value(courseIdStr),
-          // Use generic placeholder when API has no name — never the
-          // raw course_id, which leaks the internal code into UI.
+          // Store empty when API has no name — never a hardcoded placeholder
+          // (it sticks in the DB and shows as "Kurz" in listings) and never
+          // the raw course_id, which leaks the internal code into UI.
+          // The UI hides courses whose name is unknown until it resolves.
           name: Value(
             (serverData['name'] as String?)?.trim().isNotEmpty == true
                 ? serverData['name'] as String
-                : 'Kurz',
+                : '',
           ),
           version: Value(serverData['version'] as int? ?? 1),
           status: Value(serverData['status'] as String? ?? 'published'),
@@ -1676,6 +1981,32 @@ class SyncService {
         );
       }
     }
+  }
+
+  /// Store [cover] (a server `header_image`) in [course]'s JSON when it is not
+  /// there yet. Only the cover changes — content, version and sync status stay
+  /// as they are. Returns the row as stored.
+  Future<CoursesTableData> _carryCourseCover(
+    CoursesTableData course,
+    Object? cover,
+  ) async {
+    if (cover is! Map || cover['url'] == null) return course;
+
+    final Map<String, dynamic> data;
+    try {
+      final decoded = jsonDecode(course.data);
+      if (decoded is! Map<String, dynamic>) return course;
+      data = decoded;
+    } catch (e, st) {
+      silentLog('sync_service', e, st);
+      return course;
+    }
+    if (jsonEncode(data['header_image']) == jsonEncode(cover)) return course;
+
+    data['header_image'] = cover;
+    await (_db.update(_db.coursesTable)..where((t) => t.id.equals(course.id)))
+        .write(CoursesTableCompanion(data: Value(jsonEncode(data))));
+    return await _db.getCourseById(course.id) ?? course;
   }
 
   static const _uuid = Uuid();

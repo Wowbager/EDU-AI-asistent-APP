@@ -157,7 +157,16 @@ class GuestAuthService {
   /// The API responds with `{ "type": "course"|"user", ... }`.
   /// - type=course → course data in `course` key
   /// - type=user  → auth token + user profile in `token`/`user` keys
-  Future<ResolveCodeResult?> resolveCode(String code, {bool sharedDevice = false}) async {
+  ///
+  /// [mergeGuest] tells the server the code was typed by the guest whose
+  /// token rides along, so their progress is folded into the student account
+  /// even on a shared device — where it is otherwise skipped, because there
+  /// the guest is likely someone else (BR-ZDXP7C, BR-35W2HV).
+  Future<ResolveCodeResult?> resolveCode(
+    String code, {
+    bool sharedDevice = false,
+    bool mergeGuest = false,
+  }) async {
     final normalizedCode = code.toUpperCase().trim();
 
     final result = await _apiClient.post<Map<String, dynamic>>(
@@ -165,6 +174,7 @@ class GuestAuthService {
       data: {
         'code': normalizedCode,
         'shared_device': sharedDevice,
+        'merge_guest': mergeGuest,
       },
       fromJson: (data) => data as Map<String, dynamic>,
     );
@@ -187,6 +197,8 @@ class GuestAuthService {
           userId: user?['id'] as int?,
           name: user?['name'] as String?,
           email: user?['email'] as String?,
+          minor: data['minor'] == true,
+          profileSetupRequired: data['profile_setup_required'] == true,
         );
       }
     }
@@ -277,6 +289,19 @@ class ResolveCodeResult {
   final String? name;
   final String? email;
 
+  /// Whether the logged-in account is a minor (consent-gated child account).
+  /// Feeds `minorModeProvider` immediately on login — `/api/user` on the next
+  /// boot is the ongoing authority, but this makes the current session
+  /// correct without waiting for a restart.
+  final bool minor;
+
+  /// The server's verdict on whether this login stops at the sign-up
+  /// onboarding — true only until the account has been through it once
+  /// (BR-YXVMKY). A student's first entry into the app is a code login, not a
+  /// registration: the teacher created the account, so nothing else on this
+  /// path can tell "never opened before" from "signs in every morning".
+  final bool profileSetupRequired;
+
   // Course fields (when isCourse)
   final Map<String, dynamic>? courseData;
 
@@ -287,6 +312,8 @@ class ResolveCodeResult {
     this.userId,
     this.name,
     this.email,
+    this.minor = false,
+    this.profileSetupRequired = false,
     this.courseData,
   });
 
@@ -295,6 +322,8 @@ class ResolveCodeResult {
     int? userId,
     String? name,
     String? email,
+    bool minor = false,
+    bool profileSetupRequired = false,
   }) =>
       ResolveCodeResult._(
         isUser: true,
@@ -302,6 +331,8 @@ class ResolveCodeResult {
         userId: userId,
         name: name,
         email: email,
+        minor: minor,
+        profileSetupRequired: profileSetupRequired,
       );
 
   factory ResolveCodeResult.course(Map<String, dynamic> courseData) =>

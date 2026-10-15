@@ -11,6 +11,7 @@ import '../core/strings/app_strings.dart';
 import 'bookmarks_list_page.dart';
 import 'package:eduai/core/util/silent_log.dart';
 import '../widgets/page_header.dart';
+import '../core/layout/breakpoints.dart';
 
 /// Debug/About page showing app info and system status.
 class AboutPage extends ConsumerStatefulWidget {
@@ -121,7 +122,12 @@ class _AboutPageState extends ConsumerState<AboutPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ContentWidth(maxWidth: ContentWidth.reading, child: _buildPage(context));
+
+  /// This page has no wide layout yet, so [ContentWidth] keeps it at phone
+  /// width instead of stretching it across a monitor.
+  Widget _buildPage(BuildContext context) {
     final userAsync = ref.watch(activeUserStreamProvider);
     final activeUser = userAsync.valueOrNull;
     final hasLocalSession = activeUser != null;
@@ -936,7 +942,11 @@ class _AboutPageState extends ConsumerState<AboutPage> {
         final prefs = ref.read(sharedPreferencesProvider);
         await prefs.remove('guest_device_id');
 
-        // 3. Navigate to auth screen
+        // 3. Reset the palette — it lives in SharedPreferences, not Drift, so
+        //    step 1 leaves it behind (BR-P4JUDT).
+        await ThemeManager.resetToDefault();
+
+        // 4. Navigate to auth screen
         if (mounted) {
           final resetCallback = widget.onFactoryReset;
           Navigator.of(context).popUntil((route) => route.isFirst);

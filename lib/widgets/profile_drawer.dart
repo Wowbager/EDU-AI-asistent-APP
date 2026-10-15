@@ -1,6 +1,9 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
+import 'user_avatar.dart';
 
 /// A slide-out navigation drawer.
 ///
@@ -36,21 +39,13 @@ class ProfileDrawer extends StatelessWidget {
     this.onLogoutTap,
   });
 
-  // Avatar options matching profile_setup_page.dart
-  static const List<String> _avatarEmojis = [
-    '\u{1F98A}', // fox
-    '\u{1F43C}', // panda
-    '\u{1F981}', // lion
-    '\u{1F438}', // frog
-    '\u{1F989}', // owl
-    '\u{1F431}', // cat
-  ];
-
   @override
   Widget build(BuildContext context) {
     return Drawer(
       backgroundColor: AppColors.surface,
-      width: MediaQuery.of(context).size.width,
+      // Full-width on phones, capped on wider windows — the old global 640px
+      // clamp used to hide the fact that this reads the real window width.
+      width: math.min(MediaQuery.sizeOf(context).width, 400),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.zero,
       ),
@@ -142,10 +137,6 @@ class ProfileDrawer extends StatelessWidget {
   }
 
   Widget _buildUserHeader() {
-    final clampedIndex = avatarIndex.clamp(0, _avatarEmojis.length - 1);
-    final avatarBg = AppColors.avatarColors[clampedIndex];
-    final avatarEmoji = _avatarEmojis[clampedIndex];
-
     return GestureDetector(
       onTap: onProfileTap,
       behavior: HitTestBehavior.opaque,
@@ -154,20 +145,7 @@ class ProfileDrawer extends StatelessWidget {
         child: Row(
           children: [
             // Avatar
-            Container(
-              width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                color: avatarBg,
-                shape: BoxShape.circle,
-              ),
-              child: Center(
-                child: Text(
-                  avatarEmoji,
-                  style: const TextStyle(fontSize: 28),
-                ),
-              ),
-            ),
+            UserAvatar(size: 56, avatarIndex: avatarIndex),
             const SizedBox(width: 16),
             // Name and email
             Expanded(

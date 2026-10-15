@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 
 import '../../../core/network/api_client.dart';
 import '../../../core/network/api_endpoints.dart';
+import '../../../models/chat_models.dart';
 
 /// Remote data source for chat operations via REST API + SSE.
 class ChatRemoteDataSource {
@@ -25,6 +26,17 @@ class ChatRemoteDataSource {
     }
     final list = result.data!['data'] as List<dynamic>? ?? [];
     return ApiResult.success(list);
+  }
+
+  /// Fetch the mentors the user can start a chat with.
+  ///
+  /// Without [courseId] this is the new-chat list (public mentors only); with
+  /// it, the mentors of that course, hidden ones included.
+  Future<ApiResult<List<dynamic>>> fetchMentors({int? courseId}) {
+    return _getList(
+      ApiEndpoints.chatMentors,
+      queryParameters: courseId != null ? {'course_id': courseId} : null,
+    );
   }
 
   /// Fetch all chat sessions for the authenticated user.
@@ -56,16 +68,27 @@ class ChatRemoteDataSource {
   }
 
   /// Send a user message. Server creates both user + empty assistant message.
+  ///
+  /// [context] is optional task context (the lesson mentor sheet sends the
+  /// block the student is stuck on). The server stores it as a hidden
+  /// `message_type: context` message: the model sees it, the transcript
+  /// does not.
   Future<ApiResult<Map<String, dynamic>>> sendMessage(
-      int sessionId, String content) {
+      int sessionId, String content, {String? context}) {
     return _apiClient.post<Map<String, dynamic>>(
       ApiEndpoints.chatMessages(sessionId),
-      data: {'content': content},
+      data: {
+        'content': content,
+        if (context != null && context.isNotEmpty) 'context': context,
+      },
     );
   }
 
   /// Open SSE stream for an assistant message response.
-  Stream<String> streamResponse(
+  ///
+  /// Frames carry either `token` (answer text) or `suggestions` (a RAG
+  /// answer's follow-up questions, which arrive once, after the text).
+  Stream<ChatStreamEvent> streamResponse(
       int sessionId, int assistantMessageId) async* {
     final response = await _apiClient.dio.get(
       ApiEndpoints.chatStream(sessionId),
@@ -95,10 +118,15 @@ class ChatRemoteDataSource {
               if (parsed.containsKey('error')) {
                 throw Exception(parsed['error'] as String);
               }
-              yield parsed['token'] as String;
+              if (parsed.containsKey('suggestions')) {
+                yield ChatStreamSuggestions(
+                    ChatSuggestion.listFromJson(parsed['suggestions']));
+                continue;
+              }
+              yield ChatStreamToken(parsed['token'] as String);
             } catch (e) {
               if (e is Exception) rethrow;
-              yield data;
+              yield ChatStreamToken(data);
             }
           }
         }

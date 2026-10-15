@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:ui' show Rect;
+
 import 'package:drift/drift.dart';
 import 'package:drift_flutter/drift_flutter.dart';
 import 'package:uuid/uuid.dart';
@@ -21,6 +24,8 @@ import 'tables/review_logs_table.dart';
 import 'tables/student_fsrs_profiles_table.dart';
 import 'tables/work_heartbeats_table.dart';
 import 'tables/gpf_dimensions_table.dart';
+import 'tables/avatar_items_table.dart';
+import 'tables/user_avatar_table.dart';
 import 'package:eduai/core/util/silent_log.dart';
 
 part 'app_database.g.dart';
@@ -47,6 +52,8 @@ part 'app_database.g.dart';
   StudentFsrsProfilesTable,
   WorkHeartbeatsTable,
   GpfDimensionsTable,
+  AvatarItemsTable,
+  UserAvatarTable,
 ])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(driftDatabase(
@@ -61,7 +68,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.e);
 
   @override
-  int get schemaVersion => 15;
+  int get schemaVersion => 21;
 
   @override
   MigrationStrategy get migration {
@@ -141,7 +148,113 @@ class AppDatabase extends _$AppDatabase {
         if (from < 15) {
           await m.createTable(gpfDimensionsTable);
         }
+        // Add avatar catalog cache + per-user outfit in version 16 (BR-7JRBCN).
+        if (from < 16) {
+          await m.createTable(avatarItemsTable);
+          await m.createTable(userAvatarTable);
+        }
+        // Add measured content bounds to avatar_items in version 17.
+        //
+        // A separate version rather than folding the columns into 16: version
+        // 16 already shipped to stage without them, so those devices would
+        // otherwise keep a table the queries no longer match and every avatar
+        // read would fail with "no such column". The try/catch covers the
+        // from < 16 path, where createTable already included them.
+        if (from < 17) {
+          for (final column in [
+            avatarItemsTable.boundsLeft,
+            avatarItemsTable.boundsTop,
+            avatarItemsTable.boundsRight,
+            avatarItemsTable.boundsBottom,
+          ]) {
+            try {
+              await m.addColumn(avatarItemsTable, column);
+            } catch (e, st) {
+              silentLog('app_database', e, st);
+            }
+          }
+        }
+        // Denormalise the course-level only_once flag into a column in
+        // version 18 (BR-E495XK), so the practice queue can filter tests out
+        // without decoding every course JSON.
+        //
+        // Backfill runs as SQL rather than a Dart decode loop: a stored course
+        // blob contains all its blocks (including base64 images) and decoding
+        // the whole library during a migration would be needlessly heavy. The
+        // data column is always written by jsonEncode, so the key/value pair
+        // has no whitespace; the padded pattern only guards against a blob
+        // that arrived pre-encoded from elsewhere.
+        if (from < 18) {
+          try {
+            await m.addColumn(coursesTable, coursesTable.onlyOnce);
+            await customStatement(
+              "UPDATE courses SET only_once = 1 "
+              "WHERE data LIKE '%\"only_once\":true%' "
+              "OR data LIKE '%\"only_once\": true%'",
+            );
+          } catch (e, st) {
+            silentLog('app_database', e, st);
+          }
+        }
+        // Drop chat messages duplicated by the send/pull race in version 19
+        // (BR-M7EQY8). The write path now dedupes on server_id, but rows
+        // already on a device stay there — the student keeps seeing their
+        // question twice until the local database is wiped.
+        if (from < 19) {
+          try {
+            await dedupeChatMessagesByServerId();
+          } catch (e, st) {
+            silentLog('app_database', e, st);
+          }
+        }
+        // Add the EDUX coin wallet to user_stats in version 20 (BR-HK9828).
+        // Both columns default to 0, so an existing device starts at zero and
+        // the first sync pulls the server's total over it.
+        if (from < 20) {
+          for (final column in [
+            userStatsTable.coinsEarned,
+            userStatsTable.coinsBalance,
+          ]) {
+            try {
+              await m.addColumn(userStatsTable, column);
+            } catch (e, st) {
+              silentLog('app_database', e, st);
+            }
+          }
+        }
+        // block_stats becomes a pure read cache of the server's task
+        // calibration in version 21 (BR-697NCA). Until now the lesson wrote
+        // its own locally computed D and counts into it; the app now reads
+        // the cached D back, so those rows would pass for calibrated values.
+        // Clear them, and add the column the per-course pull cursor keys on.
+        if (from < 21) {
+          try {
+            await m.addColumn(blockStatsTable, blockStatsTable.courseId);
+          } catch (e, st) {
+            silentLog('app_database', e, st);
+          }
+          await delete(blockStatsTable).go();
+        }
       },
+    );
+  }
+
+  /// Collapse chat messages that share a `server_id` down to one row each.
+  ///
+  /// Keeps the longest content per `server_id`: for a duplicated pair that is
+  /// the assistant row the stream actually filled (its twin is the empty
+  /// placeholder), and two copies of a user message are identical anyway.
+  /// SQLite resolves the bare `rowid` from the row that produced `max()`,
+  /// which is what makes the sub-select pick a specific winner.
+  Future<void> dedupeChatMessagesByServerId() {
+    return customStatement(
+      'DELETE FROM chat_messages '
+      'WHERE server_id IS NOT NULL AND rowid NOT IN ('
+      '  SELECT rowid FROM ('
+      '    SELECT rowid, max(length(content)) FROM chat_messages'
+      '    WHERE server_id IS NOT NULL GROUP BY server_id'
+      '  )'
+      ')',
     );
   }
 
@@ -240,8 +353,58 @@ class AppDatabase extends _$AppDatabase {
   }
 
   /// Insert or update a course.
+  ///
+  /// Keeps the denormalised [CoursesTable.onlyOnce] column in step with the
+  /// `data` JSON it is derived from. Doing it here rather than at the ~14 call
+  /// sites means no write path can forget it and silently let a test's blocks
+  /// back into practice (BR-E495XK). Partial upserts that carry no `data`
+  /// (markSynced, markConflict) leave the flag alone.
   Future<void> upsertCourse(CoursesTableCompanion course) {
-    return into(coursesTable).insertOnConflictUpdate(course);
+    return into(coursesTable).insertOnConflictUpdate(
+      course.data.present
+          ? course.copyWith(onlyOnce: Value(_readOnlyOnce(course.data.value)))
+          : course,
+    );
+  }
+
+  /// Whether a course JSON blob carries `only_once: true`.
+  static bool _readOnlyOnce(String data) {
+    try {
+      return (jsonDecode(data) as Map<String, dynamic>)['only_once'] == true;
+    } catch (_) {
+      // Unparseable blob: treat as a normal course rather than hiding it.
+      return false;
+    }
+  }
+
+  /// Every id spelling under which an `only_once` course may be referenced.
+  ///
+  /// A practice card's `courseId` is either the local row id or the course's
+  /// own `course_id` field (see `playablePracticeProvider`), so both go in.
+  /// Selects two small columns — never the `data` blob.
+  Future<Set<String>> getOnlyOnceCourseKeys() async {
+    final rows = await (selectOnly(coursesTable)
+          ..addColumns([coursesTable.id, coursesTable.courseId])
+          ..where(coursesTable.onlyOnce.equals(true)))
+        .get();
+    return {
+      for (final row in rows) ...[
+        row.read(coursesTable.id)!,
+        row.read(coursesTable.courseId)!,
+      ],
+    };
+  }
+
+  /// Whether [courseId] — in either id spelling — names an `only_once` course.
+  Future<bool> isOnlyOnceCourse(String courseId) async {
+    final row = await (selectOnly(coursesTable)
+          ..addColumns([coursesTable.onlyOnce])
+          ..where(coursesTable.onlyOnce.equals(true) &
+              (coursesTable.id.equals(courseId) |
+                  coursesTable.courseId.equals(courseId)))
+          ..limit(1))
+        .getSingleOrNull();
+    return row != null;
   }
 
   /// Delete a course by local ID.
@@ -912,6 +1075,8 @@ class AppDatabase extends _$AppDatabase {
     DateTime? lastStreakDate,
     DateTime? dailyXpDate,
     int? dailyXpAmount,
+    int? coinsEarned,
+    int? coinsBalance,
   }) {
     return (update(userStatsTable)..where((s) => s.id.equals(id))).write(
       UserStatsTableCompanion(
@@ -923,6 +1088,8 @@ class AppDatabase extends _$AppDatabase {
         lastStreakDate: lastStreakDate != null ? Value(lastStreakDate) : const Value.absent(),
         dailyXpDate: dailyXpDate != null ? Value(dailyXpDate) : const Value.absent(),
         dailyXpAmount: dailyXpAmount != null ? Value(dailyXpAmount) : const Value.absent(),
+        coinsEarned: coinsEarned != null ? Value(coinsEarned) : const Value.absent(),
+        coinsBalance: coinsBalance != null ? Value(coinsBalance) : const Value.absent(),
         updatedAt: Value(DateTime.now()),
         syncStatus: const Value(1), // Mark as pending sync
       ),
@@ -1071,6 +1238,10 @@ class AppDatabase extends _$AppDatabase {
       await delete(chatMessagesTable).go();
       await delete(chatSessionsTable).go();
       await delete(userAchievementsTable).go();
+      // The worn outfit and the owned items are per-user data, so they go with
+      // the rest of it; the `avatar_items` catalog below is public artwork and
+      // stays cached (BR-SPR9WH).
+      await delete(userAvatarTable).go();
       await delete(gamificationConfigTable).go();
       await delete(bookmarksTable).go();
       await delete(userEloProfileTable).go();
@@ -1185,7 +1356,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // Block Stats Operations (item_pocet + elo_vector cache)
+  // Block Stats Operations (read cache of the server's task calibration)
   // ═══════════════════════════════════════════════════════════════════════════
 
   /// Get cached block stats for a specific block.
@@ -1195,20 +1366,58 @@ class AppDatabase extends _$AppDatabase {
         .getSingleOrNull();
   }
 
-  /// Upsert block stats (insert or update on conflict).
+  /// Cached block stats for [blockIds].
+  Future<List<BlockStatsTableData>> getBlockStatsFor(Iterable<String> blockIds) {
+    final ids = blockIds.toSet();
+    if (ids.isEmpty) return Future.value(const []);
+    return (select(blockStatsTable)..where((t) => t.blockId.isIn(ids))).get();
+  }
+
+  /// Store one row of the server's calibration as pulled for [courseId].
   Future<void> upsertBlockStats({
     required String blockId,
+    required String courseId,
     required String itemPocet,
     required String eloVector,
+    required DateTime serverUpdatedAt,
   }) {
     return into(blockStatsTable).insertOnConflictUpdate(
       BlockStatsTableCompanion(
         blockId: Value(blockId),
+        courseId: Value(courseId),
         itemPocet: Value(itemPocet),
         eloVector: Value(eloVector),
-        updatedAt: Value(DateTime.now()),
+        updatedAt: Value(serverUpdatedAt),
       ),
     );
+  }
+
+  /// The server `updated_at` of the newest row pulled for [courseId] — the
+  /// cursor of that course's next pull; null pulls everything.
+  Future<DateTime?> getBlockStatsCursor(String courseId) async {
+    final latest = blockStatsTable.updatedAt.max();
+    final row = await (selectOnly(blockStatsTable)
+          ..addColumns([latest])
+          ..where(blockStatsTable.courseId.equals(courseId)))
+        .getSingleOrNull();
+    return row?.read(latest);
+  }
+
+  /// Drop the cached calibration pulled for [courseId].
+  Future<void> deleteBlockStatsForCourse(String courseId) {
+    return (delete(blockStatsTable)..where((t) => t.courseId.equals(courseId)))
+        .go();
+  }
+
+  /// `course_id`s of the courses whose content is on the device — catalog
+  /// entries keep `data` at '{}' until the course is downloaded. Compared in
+  /// SQL so no course blob is loaded.
+  Future<List<String>> getDownloadedCourseIds() async {
+    final query = selectOnly(coursesTable, distinct: true)
+      ..addColumns([coursesTable.courseId])
+      ..where(coursesTable.data.equals('{}').not());
+    final rows = await query.get();
+    return [for (final row in rows) row.read(coursesTable.courseId)!];
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1254,9 +1463,40 @@ class AppDatabase extends _$AppDatabase {
         .getSingleOrNull();
   }
 
-  /// Insert or update a practice card.
+  /// All practice cards of a user (debug/diagnostics).
+  Future<List<PracticeCardsTableData>> getAllPracticeCardsForUser(
+      String userId) {
+    return (select(practiceCardsTable)..where((c) => c.userId.equals(userId)))
+        .get();
+  }
+
+  /// Get the practice cards whose blockId is [blockId] itself or a step of it
+  /// ("blockId:stepId"). Step-level bookmarks store the suffixed form while
+  /// the practice player resolves back to the base block, so a review has to
+  /// find the card through this widened match (oldest due first).
+  Future<List<PracticeCardsTableData>> getPracticeCardsForBaseBlock(
+      String userId, String blockId) {
+    return (select(practiceCardsTable)
+          ..where((c) =>
+              c.userId.equals(userId) &
+              (c.blockId.equals(blockId) | c.blockId.like('$blockId:%')))
+          ..orderBy([(c) => OrderingTerm.asc(c.dueDate)]))
+        .get();
+  }
+
+  /// Insert or update a practice card. The companion must carry every
+  /// required column — drift validates it as an INSERT even when the row
+  /// exists. For partial updates use [updatePracticeCardById].
   Future<void> upsertPracticeCard(PracticeCardsTableCompanion card) {
     return into(practiceCardsTable).insertOnConflictUpdate(card);
+  }
+
+  /// Apply a partial companion to an existing practice card, keyed on id.
+  /// Unlike [upsertPracticeCard] this never inserts, so absent columns are
+  /// simply left untouched instead of failing insert validation.
+  Future<void> updatePracticeCardById(PracticeCardsTableCompanion card) {
+    return (update(practiceCardsTable)..where((c) => c.id.equals(card.id.value)))
+        .write(card);
   }
 
   /// Get practice cards that need syncing to the server (syncStatus=1).
@@ -1416,6 +1656,90 @@ class AppDatabase extends _$AppDatabase {
   Future<void> deleteChatSession(String id) async {
     await (delete(chatMessagesTable)..where((m) => m.sessionId.equals(id))).go();
     await (delete(chatSessionsTable)..where((s) => s.id.equals(id))).go();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Avatar Operations (BR-7JRBCN)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Whole catalog, in paint order.
+  Future<List<AvatarItemsTableData>> getAvatarItems() {
+    return (select(avatarItemsTable)
+          ..orderBy([
+            (i) => OrderingTerm.asc(i.layer),
+            (i) => OrderingTerm.asc(i.code),
+          ]))
+        .get();
+  }
+
+  Future<AvatarItemsTableData?> getAvatarItem(String code) {
+    return (select(avatarItemsTable)..where((i) => i.code.equals(code)))
+        .getSingleOrNull();
+  }
+
+  /// Upsert a catalog row, preserving the cached SVG unless the caller
+  /// supplies a new one.
+  ///
+  /// Metadata refreshes (a renamed item, a changed layer) must not throw away
+  /// artwork the device already downloaded — losing it would leave the avatar
+  /// half-drawn until the next connection.
+  Future<void> upsertAvatarItem(AvatarItemsTableCompanion item) {
+    return into(avatarItemsTable).insertOnConflictUpdate(item);
+  }
+
+  /// Store downloaded artwork against a catalog row, with the content bounds
+  /// measured from it.
+  Future<void> setAvatarItemSvg(
+    String code,
+    String svg, {
+    double? boundsLeft,
+    double? boundsTop,
+    double? boundsRight,
+    double? boundsBottom,
+  }) {
+    return (update(avatarItemsTable)..where((i) => i.code.equals(code))).write(
+      AvatarItemsTableCompanion(
+        svgSource: Value(svg),
+        boundsLeft: Value(boundsLeft),
+        boundsTop: Value(boundsTop),
+        boundsRight: Value(boundsRight),
+        boundsBottom: Value(boundsBottom),
+        updatedAt: Value(DateTime.now()),
+      ),
+    );
+  }
+
+  /// Record an item's measured content box without touching its artwork.
+  Future<void> setAvatarItemBounds(String code, Rect bounds) {
+    return (update(avatarItemsTable)..where((i) => i.code.equals(code))).write(
+      AvatarItemsTableCompanion(
+        boundsLeft: Value(bounds.left),
+        boundsTop: Value(bounds.top),
+        boundsRight: Value(bounds.right),
+        boundsBottom: Value(bounds.bottom),
+      ),
+    );
+  }
+
+  /// Drop catalog rows the server no longer lists.
+  Future<void> deleteAvatarItemsExcept(List<String> keepCodes) async {
+    if (keepCodes.isEmpty) return;
+    await (delete(avatarItemsTable)..where((i) => i.code.isNotIn(keepCodes))).go();
+  }
+
+  Future<UserAvatarTableData?> getUserAvatar(String userId) {
+    return (select(userAvatarTable)..where((a) => a.userId.equals(userId)))
+        .getSingleOrNull();
+  }
+
+  Future<void> upsertUserAvatar(UserAvatarTableCompanion avatar) {
+    return into(userAvatarTable).insertOnConflictUpdate(avatar);
+  }
+
+  /// Mark the outfit synced after the server accepted it.
+  Future<void> updateUserAvatarSyncStatus(String userId, int status) {
+    return (update(userAvatarTable)..where((a) => a.userId.equals(userId)))
+        .write(UserAvatarTableCompanion(syncStatus: Value(status)));
   }
 }
 

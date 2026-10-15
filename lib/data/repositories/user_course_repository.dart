@@ -3,10 +3,7 @@ import 'dart:convert';
 import 'package:uuid/uuid.dart';
 import 'package:drift/drift.dart';
 
-import '../../core/connectivity/connectivity_service.dart';
 import '../../core/database/app_database.dart';
-import '../../core/network/api_client.dart';
-import '../../core/network/api_endpoints.dart';
 import '../../core/sync/sync_queue.dart';
 import '../../core/sync/sync_status.dart';
 import 'package:eduai/core/util/silent_log.dart';
@@ -155,6 +152,14 @@ class UserCourse {
   /// Whether the course is completed.
   bool get isCompleted => status == UserCourseStatus.completed;
 
+  /// Whether the course is flagged "only once" — typically a test.
+  ///
+  /// The one place the course lists ask the question, so the rule stays
+  /// greppable instead of being a raw JSON lookup repeated per screen. Such a
+  /// course is hidden from the dashboard and the library, cannot be re-entered
+  /// after completion, and none of its blocks feed practice (BR-E495XK).
+  bool get isOnlyOnce => courseData?['only_once'] == true;
+
   /// Whether the user has any recorded progress but hasn't finished the course.
   ///
   /// Used by the dashboard "Pokračovat" section. It deliberately does NOT rely
@@ -182,19 +187,13 @@ class UserCourse {
 /// Implements offline-first pattern: reads from local, writes queue for sync.
 class UserCourseRepository {
   final AppDatabase _db;
-  final ApiClient _apiClient;
-  final ConnectivityService _connectivity;
   final SyncQueue _syncQueue;
   final _uuid = const Uuid();
 
   UserCourseRepository({
     required AppDatabase db,
-    required ApiClient apiClient,
-    required ConnectivityService connectivity,
     required SyncQueue syncQueue,
   })  : _db = db,
-        _apiClient = apiClient,
-        _connectivity = connectivity,
         _syncQueue = syncQueue;
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -406,96 +405,12 @@ class UserCourseRepository {
   // Sync Operations
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /// Sync user courses from server.
-  Future<void> syncFromServer(String userId) async {
-    final isOnline = await _connectivity.isOnline;
-    if (!isOnline) return;
-
-    final result = await _apiClient.get<Map<String, dynamic>>(
-      ApiEndpoints.userCourses,
-    );
-
-    if (result.isFailure) return;
-
-    try {
-      final userCoursesJson = result.data!['user_courses'] as List<dynamic>? ?? [];
-
-      for (final json in userCoursesJson) {
-        final remoteData = json as Map<String, dynamic>;
-        final serverId = remoteData['id'] as int;
-
-        // API returns course_id as string identifier and server_id as numeric FK.
-        // Handle both old (numeric) and new (string) formats.
-        final courseIdRaw = remoteData['course_id'];
-        final courseNumericId = remoteData['server_id'] as int?
-            ?? (courseIdRaw is int ? courseIdRaw : null);
-        final courseStringId = courseIdRaw is String ? courseIdRaw : null;
-
-        // Find the local course — try numeric server ID first, then string course_id.
-        CoursesTableData? localCourse;
-        if (courseNumericId != null) {
-          localCourse = await _db.getCourseByServerId(courseNumericId);
-        }
-        localCourse ??= courseStringId != null
-            ? await _db.getCourseByFieldCourseId(courseStringId)
-            : null;
-        if (localCourse == null) continue;
-
-        // Check if we already have this user course locally.
-        final existingLocal = await _db.getUserCourseByUserAndCourse(
-          userId,
-          localCourse.id,
-        );
-
-        final courseData = remoteData['course'] as Map<String, dynamic>?;
-        int totalLessons = 0;
-        if (courseData != null && courseData['data'] != null) {
-          final data = courseData['data'] as Map<String, dynamic>;
-          final lessons = data['lessons'] as List<dynamic>?;
-          totalLessons = lessons?.length ?? 0;
-        }
-
-        await _db.upsertUserCourse(
-          UserCoursesTableCompanion(
-            id: Value(existingLocal?.id ?? _uuid.v4()),
-            serverId: Value(serverId),
-            userId: Value(userId),
-            courseId: Value(localCourse.id),
-            status: Value(remoteData['status'] as String? ?? 'downloaded'),
-            progressPercent: Value(remoteData['progress_percent'] as int? ?? 0),
-            completedLessons: Value(remoteData['completed_lessons'] as int? ?? 0),
-            totalLessons: Value(remoteData['total_lessons'] as int? ?? totalLessons),
-            currentLessonIndex: Value(remoteData['current_lesson_index'] as int? ?? 0),
-            timeSpentSeconds: Value(remoteData['time_spent_seconds'] as int? ?? 0),
-            progressDataJson: Value(
-              remoteData['progress_data'] != null
-                  ? jsonEncode(remoteData['progress_data'])
-                  : '{}',
-            ),
-            startedAt: Value(
-              remoteData['started_at'] != null
-                  ? DateTime.parse(remoteData['started_at'] as String)
-                  : null,
-            ),
-            completedAt: Value(
-              remoteData['completed_at'] != null
-                  ? DateTime.parse(remoteData['completed_at'] as String)
-                  : null,
-            ),
-            syncStatus: const Value(0), // Synced
-            updatedAt: Value(DateTime.now()),
-          ),
-        );
-
-        // Clear any pending sync for this record.
-        if (existingLocal != null) {
-          await _syncQueue.clearForRecord('user_courses', existingLocal.id);
-        }
-      }
-    } catch (e) {
-      // Log error but don't throw.
-    }
-  }
+  // NOTE: pulling user courses from the server lives in
+  // SyncService._pullUserCourseUpdates — the single source of truth wired into
+  // the sync engine. An older syncFromServer() duplicate used to live here but
+  // was unused (no callers) and carried the BR-SNUYF7 bug where enrollments
+  // whose local catalog row was missing (private courses) were silently
+  // dropped; it was removed to avoid a second copy drifting out of sync.
 
   /// Build payload for sync operations.
   Map<String, dynamic> _buildSyncPayload(UserCoursesTableData data) {

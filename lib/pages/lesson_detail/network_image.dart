@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import '../../core/theme/app_theme.dart';
-import '../../core/utils/image_url.dart';
 import '../../models/block_model.dart';
+import '../../widgets/lesson_image.dart';
 
-/// Network image renderer that handles both raster and SVG sources.
+/// Network image renderer that handles both raster and SVG sources, and keeps
+/// working offline through [LessonImage] (BR-BX9AA4).
 class LessonNetworkImage extends StatelessWidget {
   final String rawUrl;
   final BoxFit fit;
@@ -25,32 +25,15 @@ class LessonNetworkImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final url = resolveImageUrl(rawUrl);
-    final isSvg = url.toLowerCase().endsWith('.svg') ||
-        url.toLowerCase().contains('.svg?');
     final fallback = errorWidget ??
         Icon(Icons.broken_image, size: 48, color: AppColors.progressFill);
 
-    if (isSvg) {
-      return ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: height ?? 240,
-          maxWidth: width ?? double.infinity,
-        ),
-        child: SvgPicture.network(
-          url,
-          fit: fit,
-          placeholderBuilder:
-              loadingWidget != null ? (_) => loadingWidget! : null,
-        ),
-      );
-    }
-
-    return Image.network(
-      url,
+    return LessonImage(
+      url: rawUrl,
       fit: fit,
       width: width,
       height: height,
+      svgPlaceholder: loadingWidget,
       errorBuilder: (context, error, stack) => fallback,
       loadingBuilder: loadingWidget != null
           ? (context, child, progress) {
@@ -63,6 +46,10 @@ class LessonNetworkImage extends StatelessWidget {
 }
 
 /// Block image with rounded corners and a styled error state.
+///
+/// BR-5VYB78 — no explicit width, so the image stops at its own resolution
+/// (100 %) instead of being stretched across the card; a picture wider than
+/// the card still shrinks to fit, and anything narrower sits centred.
 class LessonBlockImage extends StatelessWidget {
   final StepImage image;
 
@@ -70,16 +57,17 @@ class LessonBlockImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: AppDecorations.radiusM,
-      child: LessonNetworkImage(
-        rawUrl: image.url,
-        fit: BoxFit.contain,
-        width: double.infinity,
-        errorWidget: Container(
-          padding: const EdgeInsets.all(32),
-          color: AppColors.background,
-          child: const Icon(Icons.broken_image, size: 48, color: Colors.grey),
+    return Align(
+      child: ClipRRect(
+        borderRadius: AppDecorations.radiusM,
+        child: LessonNetworkImage(
+          rawUrl: image.url,
+          fit: BoxFit.contain,
+          errorWidget: Container(
+            padding: const EdgeInsets.all(32),
+            color: AppColors.background,
+            child: const Icon(Icons.broken_image, size: 48, color: Colors.grey),
+          ),
         ),
       ),
     );

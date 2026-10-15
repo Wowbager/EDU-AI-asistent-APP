@@ -8,6 +8,7 @@ import '../core/providers/core_providers.dart';
 import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
 import 'package:eduai/core/util/silent_log.dart';
+import '../core/layout/breakpoints.dart';
 
 /// A page that displays all saved bookmarks grouped by course.
 class BookmarksListPage extends ConsumerStatefulWidget {
@@ -216,7 +217,12 @@ class _BookmarksListPageState extends ConsumerState<BookmarksListPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ContentWidth(maxWidth: ContentWidth.reading, child: _buildPage(context));
+
+  /// This page has no wide layout yet, so [ContentWidth] keeps it at phone
+  /// width instead of stretching it across a monitor.
+  Widget _buildPage(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
