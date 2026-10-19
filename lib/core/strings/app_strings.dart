@@ -1438,6 +1438,13 @@ class AppStrings {
   static String get engineAnswerAllQuestions => _t('engineAnswerAllQuestions');
   static String get engineTryAgain => _t('engineTryAgain');
 
+  // ── Widgets: Block Action Buttons (screen-reader labels) ──
+  static String get actionBookmark => _t('actionBookmark');
+  static String get actionLike => _t('actionLike');
+  static String get actionDislike => _t('actionDislike');
+  static String get actionHint => _t('actionHint');
+  static String get actionDone => _t('actionDone');
+
   // ── Widgets: Stat Card ──
   static String get statStreak => _t('statStreak');
   static String get statStreakSubtitle => _t('statStreakSubtitle');
@@ -2357,6 +2364,11 @@ class AppStrings {
     'engineSelectAnswer': 'Nejprve vyber odpověď',
     'engineAnswerAllQuestions': 'Nejprve odpověz na všechny otázky',
     'engineTryAgain': 'Zkusit znovu',
+    'actionBookmark': 'Uložit do záložek',
+    'actionLike': 'Líbí se mi',
+    'actionDislike': 'Nelíbí se mi',
+    'actionHint': 'Nápověda',
+    'actionDone': 'Hotovo',
     'statStreak': 'Streak',
     'statStreakSubtitle': 'Skvělá práce!\nPokračuj v učení.',
     'statTrophiesSubtitle': 'Sbírej trofeje a odemykej\nnové odměny.',
@@ -3219,6 +3231,11 @@ class AppStrings {
     'engineSelectAnswer': 'Pick an answer first',
     'engineAnswerAllQuestions': 'Answer every question first',
     'engineTryAgain': 'Try again',
+    'actionBookmark': 'Bookmark',
+    'actionLike': 'Like',
+    'actionDislike': 'Dislike',
+    'actionHint': 'Hint',
+    'actionDone': 'Done',
     'statStreak': 'Streak',
     'statStreakSubtitle': 'Great work!\nKeep learning.',
     'statTrophiesSubtitle': 'Collect trophies and unlock\nnew rewards.',
@@ -3906,6 +3923,11 @@ class AppStrings {
     'engineSelectAnswer': 'Najprv vyber odpoveď',
     'engineAnswerAllQuestions': 'Najprv odpovedz na všetky otázky',
     'engineTryAgain': 'Skúsiť znova',
+    'actionBookmark': 'Uložiť do záložiek',
+    'actionLike': 'Páči sa mi',
+    'actionDislike': 'Nepáči sa mi',
+    'actionHint': 'Nápoveda',
+    'actionDone': 'Hotovo',
     'statStreak': 'Streak',
     'statDays': 'dní',
     'statTrophies': 'Trofeje',

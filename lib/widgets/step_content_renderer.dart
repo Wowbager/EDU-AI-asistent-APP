@@ -17,11 +17,19 @@ import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
 import '../models/block_model.dart';
 import '../models/step_navigation.dart';
+import '../preview/preview_mode.dart';
 import 'answer_photo_picker.dart';
 import 'lesson_image.dart';
 import 'markdown_latex_widget.dart';
 import 'open_answer_feedback_card.dart';
 
+/// Renders one step's content.
+///
+/// Inside the editor's preview (see `preview/preview_mode.dart`) the passive leaves
+/// — text, media, the solution, an option's feedback — are wrapped in a
+/// `PreviewTarget`, so clicking one takes the author to the field that produced it.
+/// The interactive controls are deliberately left alone: clicking an answer in the
+/// preview answers the question, which is what "try it" has to mean.
 class StepContentRenderer extends StatelessWidget {
   final BlockStep step;
   final StepAnswerState? answerState;
@@ -273,18 +281,18 @@ class StepContentRenderer extends StatelessWidget {
     final qType = config.type;
 
     if (qType == 'true_false') {
-      widgets.addAll(_buildTrueFalseButtons(config, isAnswered));
+      widgets.addAll(_buildTrueFalseButtons(context, config, isAnswered));
     } else if (qType == 'numeric') {
       widgets.addAll(_buildNumericQuestion(config, isAnswered));
     } else if (qType == 'open') {
       widgets.addAll(_buildOpenQuestion(config, isAnswered, anchorFeedback));
     } else if (config.allowMultiple) {
       // allow_multiple: checkbox-style multi-select (takes priority over show_answers)
-      widgets.addAll(_buildCheckboxOptions(config, isAnswered));
+      widgets.addAll(_buildCheckboxOptions(context, config, isAnswered));
     } else {
       // Default: radio-style single select
       // (show_answers only controls whether correct answer is revealed after answering)
-      widgets.addAll(_buildRadioOptions(config, isAnswered));
+      widgets.addAll(_buildRadioOptions(context, config, isAnswered));
     }
 
     // Verdict for a multi-select answer (BR-J3KNJS).
@@ -375,7 +383,28 @@ class StepContentRenderer extends StatelessWidget {
 
   // ─── Radio Option Cards (single select) ──────────────────
 
-  List<Widget> _buildRadioOptions(EvaluationConfig config, bool isAnswered) {
+  /// What tapping an answer does.
+  ///
+  /// Normally it answers. In the editor's expanded preview the author is reading
+  /// the card, not taking it, so the tap reports where that option is authored and
+  /// the editor focuses it. Outside preview mode `interactive` is true and this is
+  /// exactly the callback it always was.
+  VoidCallback? _onOptionTap(
+    BuildContext context,
+    String optionId,
+    bool isAnswered,
+    VoidCallback answer,
+  ) {
+    final mode = PreviewMode.of(context);
+    if (mode.enabled && !mode.interactive) {
+      return () => mode.onRefTapped?.call(
+            mode.refFor(stepId: step.stepId, optionId: optionId, field: 'text'),
+          );
+    }
+    return isAnswered ? null : answer;
+  }
+
+  List<Widget> _buildRadioOptions(BuildContext context, EvaluationConfig config, bool isAnswered) {
     return config.options.map((option) {
       final isSelected = answerState?.selectedOptionId == option.id;
       final isCorrect = option.isCorrect;
@@ -408,7 +437,12 @@ class StepContentRenderer extends StatelessWidget {
         padding: const EdgeInsets.only(bottom: 8),
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTap: isAnswered ? null : () => onOptionSelected?.call(option.id),
+          onTap: _onOptionTap(
+            context,
+            option.id,
+            isAnswered,
+            () => onOptionSelected?.call(option.id),
+          ),
           child: Container(
             width: double.infinity,
             padding: const EdgeInsets.all(16),
@@ -462,7 +496,7 @@ class StepContentRenderer extends StatelessWidget {
 
   // ─── Checkbox Option Cards (multi select) ─────────────────
 
-  List<Widget> _buildCheckboxOptions(EvaluationConfig config, bool isAnswered) {
+  List<Widget> _buildCheckboxOptions(BuildContext context, EvaluationConfig config, bool isAnswered) {
     final selectedIds = answerState?.selectedOptionIds ?? {};
 
     // A correct option left unticked is part of the mistake, so once the
@@ -503,17 +537,15 @@ class StepContentRenderer extends StatelessWidget {
         padding: const EdgeInsets.only(bottom: 8),
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTap: isAnswered
-              ? null
-              : () {
-                  final newSet = Set<String>.from(selectedIds);
-                  if (isSelected) {
-                    newSet.remove(option.id);
-                  } else {
-                    newSet.add(option.id);
-                  }
-                  onMultipleOptionsSelected?.call(newSet);
-                },
+          onTap: _onOptionTap(context, option.id, isAnswered, () {
+            final newSet = Set<String>.from(selectedIds);
+            if (isSelected) {
+              newSet.remove(option.id);
+            } else {
+              newSet.add(option.id);
+            }
+            onMultipleOptionsSelected?.call(newSet);
+          }),
           child: Container(
             width: double.infinity,
             padding: const EdgeInsets.all(16),
@@ -547,7 +579,7 @@ class StepContentRenderer extends StatelessWidget {
 
   // ─── True/False Buttons ──────────────────────────────────
 
-  List<Widget> _buildTrueFalseButtons(EvaluationConfig config, bool isAnswered) {
+  List<Widget> _buildTrueFalseButtons(BuildContext context, EvaluationConfig config, bool isAnswered) {
     return [
       Row(
         children: config.options.map((option) {
@@ -572,7 +604,12 @@ class StepContentRenderer extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 4),
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: isAnswered ? null : () => onOptionSelected?.call(option.id),
+                onTap: _onOptionTap(
+                  context,
+                  option.id,
+                  isAnswered,
+                  () => onOptionSelected?.call(option.id),
+                ),
                 child: Container(
                   padding: const EdgeInsets.symmetric(vertical: 20),
                   decoration: BoxDecoration(
@@ -937,6 +974,15 @@ class StepContentRenderer extends StatelessWidget {
   /// [approving] overrides whose correctness the banner is styled after —
   /// used by multi-select, where the option is only part of the answer.
   Widget _buildFeedbackBanner(EvaluationOption option, {bool? approving}) {
+    return PreviewTarget(
+      stepId: step.stepId,
+      optionId: option.id,
+      field: 'feedback',
+      child: _buildFeedbackBannerBody(option, approving: approving),
+    );
+  }
+
+  Widget _buildFeedbackBannerBody(EvaluationOption option, {bool? approving}) {
     final isCorrect = approving ?? option.isCorrect;
     return Container(
       width: double.infinity,
@@ -989,6 +1035,14 @@ class StepContentRenderer extends StatelessWidget {
   // ─── Solution Banner ─────────────────────────────────────
 
   Widget _buildSolutionBanner(EvaluationConfig config) {
+    return PreviewTarget(
+      stepId: step.stepId,
+      field: 'question.solution',
+      child: _buildSolutionBannerBody(config),
+    );
+  }
+
+  Widget _buildSolutionBannerBody(EvaluationConfig config) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12),
@@ -1256,6 +1310,14 @@ class StepContentRenderer extends StatelessWidget {
   /// Render rich content. Extracts inline <video> embeds first, then renders
   /// the remaining text segments as markdown/HTML in document order.
   Widget _buildRichContent(String text, String? html, bool isMarkdown) {
+    return PreviewTarget(
+      stepId: step.stepId,
+      field: 'content',
+      child: _buildRichContentBody(text, html, isMarkdown),
+    );
+  }
+
+  Widget _buildRichContentBody(String text, String? html, bool isMarkdown) {
     if (hasVideoEmbed(text)) {
       final parts = parseContentEmbeds(text);
       final children = <Widget>[];
@@ -1319,6 +1381,14 @@ class StepContentRenderer extends StatelessWidget {
 
   Widget _buildStepImage(StepImage image) {
     if (image.url.isEmpty) return const SizedBox.shrink();
+    return PreviewTarget(
+      stepId: step.stepId,
+      field: 'image.url',
+      child: _buildStepImageBody(image),
+    );
+  }
+
+  Widget _buildStepImageBody(StepImage image) {
 
     // BR-5VYB78 — the raster branch carries no width, so the image is drawn at
     // its own resolution (100 %) at most; a wider one still scales down to the
@@ -1393,6 +1463,14 @@ class StepContentRenderer extends StatelessWidget {
   /// Build a video player for an explicit [url] (used by both the dedicated
   /// video step and inline <video> embeds extracted from text content).
   Widget _buildStepVideoUrl(String url) {
+    return PreviewTarget(
+      stepId: step.stepId,
+      field: 'video.url',
+      child: _buildStepVideoUrlBody(url),
+    );
+  }
+
+  Widget _buildStepVideoUrlBody(String url) {
     if (url.isEmpty) return const SizedBox.shrink();
 
     // Use parent-provided pooled controller if available

@@ -7,6 +7,7 @@ import '../main.dart' show routeObserver;
 import '../pages/consent/consent_confirm_web_page.dart';
 import '../pages/consent/consent_manage_web_page.dart';
 import '../pages/legal/legal_page.dart';
+import '../preview/preview_page.dart';
 import 'shell_entry.dart';
 import 'tab_routes.dart';
 
@@ -130,6 +131,16 @@ GoRouter buildAppRouter({
           ),
         );
       },
+    ),
+    // The course editor's preview surface. Deliberately outside the shell: it is
+    // driven entirely by JSON posted in from the parent frame, there is no student
+    // session behind it, and nothing it does is written anywhere.
+    GoRoute(
+      path: '/preview',
+      pageBuilder: (context, state) => NoTransitionPage(
+        key: state.pageKey,
+        child: const PreviewPage(),
+      ),
     ),
     for (final slug in legalSlugs) ...[
       GoRoute(

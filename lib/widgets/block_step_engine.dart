@@ -13,11 +13,11 @@ import '../core/evaluation/ai_answer_evaluator.dart';
 import '../core/evaluation/expected_answer.dart';
 import '../core/strings/app_strings.dart';
 import '../core/theme/app_theme.dart';
-import '../core/ui/app_toast.dart';
 import '../data/repositories/open_answer_repository.dart';
 import '../models/block_model.dart';
 import '../models/step_navigation.dart';
 import 'answer_photo_picker.dart';
+import 'block_action_buttons.dart';
 import 'step_content_renderer.dart';
 
 /// Controller that allows a parent widget (e.g. QuizPage) to query and drive
@@ -196,6 +196,13 @@ class BlockStepEngine extends ConsumerStatefulWidget {
   final void Function(StepProgressData)? onStepProgress;
   final StepProgressData? savedProgress;
 
+  /// Called with the index of the step now on screen whenever it changes,
+  /// including the first one after mounting or restoring — which is what
+  /// [onStepProgress] does not cover — and with every step the card is drawing
+  /// at that moment, in order. Reported after the frame, once per change. Null in
+  /// the student's app; the editor's preview follows the run with it.
+  final void Function(int stepIndex, List<int> onScreen)? onStepShown;
+
   /// Optional controller for external answer confirmation (used by QuizPage).
   /// When provided, the engine hides its own bottom row and lets the parent
   /// drive confirm/next via the controller.
@@ -264,6 +271,7 @@ class BlockStepEngine extends ConsumerStatefulWidget {
     this.onChatRequested,
     this.onStepProgress,
     this.savedProgress,
+    this.onStepShown,
     this.controller,
     this.hideEvaluation = false,
     this.onBookmarkToggle,
@@ -326,7 +334,74 @@ class _BlockStepEngineState extends ConsumerState<BlockStepEngine> {
   final Map<String, String> _attemptIds = {};
 
   late _EngineState _state;
-  late int _currentStepIndex;
+
+  /// Every write goes through the setter, so [BlockStepEngine.onStepShown] is
+  /// reported from one place however the index moved — mount, restore, skip to
+  /// the question, advance, branch.
+  late int _stepIndex;
+  int get _currentStepIndex => _stepIndex;
+  set _currentStepIndex(int value) {
+    _stepIndex = value;
+    if (value >= 0 && value < _steps.length) _visited.add(value);
+    _scheduleStepShown();
+  }
+
+  /// Every step the student has been shown in this card. A `go_to` can skip
+  /// steps; the history is these, not every step before the current one.
+  final Set<int> _visited = {};
+
+  int? _shownStepIndex;
+  List<int> _shownOnScreen = const [];
+  bool _stepShownScheduled = false;
+
+  void _scheduleStepShown() {
+    if (widget.onStepShown == null || _stepShownScheduled) return;
+    _stepShownScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _stepShownScheduled = false;
+      if (!mounted) return;
+      final index = _stepIndex;
+      if (index < 0 || index >= _steps.length) return;
+      final onScreen = _stepsOnScreen();
+      if (index == _shownStepIndex && _sameIndices(onScreen, _shownOnScreen)) return;
+      _shownStepIndex = index;
+      _shownOnScreen = onScreen;
+      widget.onStepShown?.call(index, onScreen);
+    });
+  }
+
+  static bool _sameIndices(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  bool get _isBlockDone => _state == _EngineState.blockComplete || widget.isCompleted;
+
+  /// Whether the block draws all of its steps in one bubble from the start
+  /// (exercise and question blocks), rather than a card per step as it is reached.
+  bool get _isSingleBubble =>
+      widget.block.type == BlockType.exercise || widget.block.type == BlockType.question;
+
+  /// The steps this card draws, in order. A single bubble draws every step. A
+  /// card per step draws the ones visited before the current step, plus the
+  /// current one; once finished it keeps all of its visited steps, and one that
+  /// was restored as finished without a record of its visits draws all of them.
+  List<int> _stepsOnScreen() {
+    final all = [for (var i = 0; i < _steps.length; i++) i];
+    if (_isSingleBubble) return all;
+    if (_isBlockDone) {
+      if (_visited.isEmpty) return all;
+      return all.where(_visited.contains).toList();
+    }
+    return [
+      for (var i = 0; i < _currentStepIndex && i < _steps.length; i++)
+        if (_visited.contains(i)) i,
+      if (_currentStepIndex < _steps.length) _currentStepIndex,
+    ];
+  }
   late Map<String, StepAnswerState> _stepAnswers;
   late double _bestScoreKoef;
   late int _earnedXp;
@@ -458,8 +533,14 @@ class _BlockStepEngineState extends ConsumerState<BlockStepEngine> {
   void _restoreOrInitState() {
     _rebuildViewSteps();
     final saved = widget.savedProgress;
+    _visited.clear();
     if (saved != null && saved.blockId == widget.block.blockId) {
-      _currentStepIndex = saved.currentStepIndex.clamp(0, _steps.length - 1);
+      // Progress saved before visits were recorded: assume the steps up to the
+      // current one, which is what the card used to draw.
+      final last = saved.currentStepIndex.clamp(0, _steps.length - 1);
+      _visited.addAll(saved.visitedSteps?.where((i) => i >= 0 && i < _steps.length) ??
+          [for (var i = 0; i < last; i++) i]);
+      _currentStepIndex = last;
       _stepAnswers = Map.from(saved.stepAnswers);
       _bestScoreKoef = saved.bestScoreKoef;
       _earnedXp = saved.earnedXp;
@@ -1757,6 +1838,7 @@ class _BlockStepEngineState extends ConsumerState<BlockStepEngine> {
       currentStepIndex: _currentStepIndex,
       stepAnswers: Map.from(_stepAnswers),
       isBlockCompleted: _state == _EngineState.blockComplete,
+      visitedSteps: (_visited.toList()..sort()),
       bestScoreKoef: _bestScoreKoef == _kUninitializedScore ? 0.0 : _bestScoreKoef,
       earnedXp: _earnedXp,
       quizMark: _quizMark,
@@ -1781,15 +1863,16 @@ class _BlockStepEngineState extends ConsumerState<BlockStepEngine> {
 
     // All other blocks: render each visited step as its own card.
     // Completed steps show as dimmed history; the current step is active.
-    final isBlockDone = _state == _EngineState.blockComplete || widget.isCompleted;
-    final visibleCount = isBlockDone ? _steps.length : _currentStepIndex + 1;
+    // A step a `go_to` skipped is not history: the student never saw it.
+    final isBlockDone = _isBlockDone;
+    final onScreen = _stepsOnScreen();
 
     final reworkable = isBlockDone ? _reworkableStepIndex : null;
 
     return Column(
       children: [
-        for (int i = 0; i < visibleCount; i++) ...[
-          if (i > 0) const SizedBox(height: 16),
+        for (final i in onScreen) ...[
+          if (i != onScreen.first) const SizedBox(height: 16),
           i < _currentStepIndex || isBlockDone
               ? _buildHistoryStepCard(i)
               : _buildActiveStepCard(),
@@ -1975,16 +2058,7 @@ class _BlockStepEngineState extends ConsumerState<BlockStepEngine> {
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         _buildStepActionButtons(step),
-        Container(
-          width: 48,
-          height: 48,
-          decoration: BoxDecoration(
-            color: AppColors.success,
-            shape: BoxShape.circle,
-            boxShadow: AppDecorations.shadowStrong,
-          ),
-          child: const Icon(Icons.check, color: Colors.white, size: 24),
-        ),
+        const BlockMainButton(isComplete: true),
       ],
     );
   }
@@ -2087,148 +2161,52 @@ class _BlockStepEngineState extends ConsumerState<BlockStepEngine> {
       widget.block.hasHintForStep(_currentStepOrNull?.stepId);
 
   /// Per-step action buttons for display blocks — each step has independent state.
+  ///
+  /// The closures are built here rather than passed as bare nullable callbacks: a
+  /// per-step toggle needs the step id, and a `GestureDetector` with a non-null
+  /// `onTap` also absorbs the tap, which is the behaviour these rows have always had.
   Widget _buildStepActionButtons(BlockStep step) {
     final stepId = step.stepId;
-    final isBookmarked = widget.bookmarkedStepIds.contains(stepId);
-    final isLiked = widget.likedStepIds.contains(stepId);
-    final isDisliked = widget.dislikedStepIds.contains(stepId);
-
-    final isQuiz = widget.exportMode == ExportMode.quizV2;
-
-    // In quiz mode, only show hint button (no bookmark/like/dislike)
-    final buttons = <Widget>[
-      if (!isQuiz) ...[
-        _buildActionButton(
-          icon: isBookmarked ? Icons.bookmark : Icons.bookmark_border,
-          isActive: isBookmarked,
-          onTap: () => widget.onStepBookmarkToggle?.call(stepId),
-        ),
-        _buildActionButton(
-          icon: Icons.thumb_up_outlined,
-          isActive: isLiked,
-          activeColor: AppColors.success,
-          onTap: () => widget.onStepLikeToggle?.call(stepId),
-        ),
-        _buildActionButton(
-          icon: Icons.thumb_down_outlined,
-          isActive: isDisliked,
-          activeColor: AppColors.orange,
-          onTap: () => widget.onStepDislikeToggle?.call(stepId),
-        ),
-      ],
+    return BlockActionBar(
+      exportMode: widget.exportMode,
+      isBookmarked: widget.bookmarkedStepIds.contains(stepId),
+      isLiked: widget.likedStepIds.contains(stepId),
+      isDisliked: widget.dislikedStepIds.contains(stepId),
       // Each step card carries its own hint button: a step without a hint of
       // its own still offers the block's shared one (BR-JHDNB3).
-      if (widget.block.hasHintForStep(stepId))
-        _buildActionButton(
-          icon: Icons.help_outline,
-          isActive: false,
-          onTap: () => widget.onHintRequested?.call(stepId),
-        ),
-    ];
-
-    if (buttons.isEmpty) return const SizedBox.shrink();
-
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(36),
-        boxShadow: AppDecorations.shadowStrong,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: buttons,
-      ),
+      showHint: widget.block.hasHintForStep(stepId),
+      onBookmark: () => widget.onStepBookmarkToggle?.call(stepId),
+      onLike: () => widget.onStepLikeToggle?.call(stepId),
+      onDislike: () => widget.onStepDislikeToggle?.call(stepId),
+      onHint: () => widget.onHintRequested?.call(stepId),
     );
   }
 
   /// Block-level action buttons (for exercise/question blocks — single bubble).
+  ///
+  /// The callbacks go through as they are, nulls included: when the owner wires
+  /// nothing to them the buttons must not swallow the tap.
   Widget _buildActionButtons() {
-    final isQuiz = widget.exportMode == ExportMode.quizV2;
-
-    // In quiz mode, only show hint button (no bookmark/like/dislike)
-    final buttons = <Widget>[
-      if (!isQuiz) ...[
-        _buildActionButton(
-          icon: widget.isBookmarked ? Icons.bookmark : Icons.bookmark_border,
-          isActive: widget.isBookmarked,
-          onTap: widget.onBookmarkToggle,
-        ),
-        _buildActionButton(
-          icon: Icons.thumb_up_outlined,
-          isActive: widget.isLiked,
-          activeColor: AppColors.success,
-          onTap: widget.onLikeToggle,
-        ),
-        _buildActionButton(
-          icon: Icons.thumb_down_outlined,
-          isActive: widget.isDisliked,
-          activeColor: AppColors.orange,
-          onTap: widget.onDislikeToggle,
-        ),
-      ],
+    return BlockActionBar(
+      exportMode: widget.exportMode,
+      isBookmarked: widget.isBookmarked,
+      isLiked: widget.isLiked,
+      isDisliked: widget.isDisliked,
       // The single-bubble card shows one row for the whole block, so the hint
       // follows whichever step is live inside it (BR-JHDNB3).
-      if (_hasHintForCurrentStep)
-        _buildActionButton(
-          icon: Icons.help_outline,
-          isActive: false,
-          onTap: () =>
-              widget.onHintRequested?.call(_currentStepOrNull?.stepId),
-        ),
-    ];
-
-    if (buttons.isEmpty) return const SizedBox.shrink();
-
-    return Container(
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(36),
-        boxShadow: AppDecorations.shadowStrong,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: buttons,
-      ),
-    );
-  }
-
-  Widget _buildActionButton({
-    required IconData icon,
-    required bool isActive,
-    Color? activeColor,
-    VoidCallback? onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.all(10),
-        child: Icon(
-          icon,
-          size: 22,
-          color: isActive
-              ? (activeColor ?? AppColors.quizPurple)
-              : AppColors.primaryDark64,
-        ),
-      ),
+      showHint: _hasHintForCurrentStep,
+      onBookmark: widget.onBookmarkToggle,
+      onLike: widget.onLikeToggle,
+      onDislike: widget.onDislikeToggle,
+      onHint: () => widget.onHintRequested?.call(_currentStepOrNull?.stepId),
     );
   }
 
   Widget _buildMainButton() {
     final bool isComplete = _state == _EngineState.blockComplete || widget.isCompleted;
 
-    if (isComplete) {
-      return Container(
-        width: 48,
-        height: 48,
-        decoration: BoxDecoration(
-          color: AppColors.success,
-          shape: BoxShape.circle,
-          boxShadow: AppDecorations.shadowStrong,
-        ),
-        child: const Icon(Icons.check, color: Colors.white, size: 24),
-      );
-    }
+    // Short-circuit, as it always has: a finished block has no state left to read.
+    if (isComplete) return const BlockMainButton(isComplete: true);
 
     // Determine button behavior based on state
     VoidCallback? onTap;
@@ -2273,75 +2251,16 @@ class _BlockStepEngineState extends ConsumerState<BlockStepEngine> {
         break;
     }
 
-    // While an answer is out for AI grading the button is inert and spins —
-    // the student gets a visible "working" signal instead of a dead tap.
-    if (_isEvaluatingWithAi) {
-      return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-        decoration: BoxDecoration(
-          color: AppColors.primaryDark,
-          borderRadius: AppDecorations.radiusM,
-        ),
-        child: const SizedBox(
-          width: 20,
-          height: 20,
-          child: CircularProgressIndicator(
-            strokeWidth: 2,
-            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-          ),
-        ),
-      );
-    }
-
-    // If we have a text label, show a pill button
-    if (label != null) {
-      return GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-          decoration: BoxDecoration(
-            color: enabled ? AppColors.primaryDark : AppColors.surfaceLight,
-            borderRadius: AppDecorations.radiusM,
-          ),
-          child: Text(
-            label,
-            style: AppTextStyles.statValue(
-              color: enabled ? Colors.white : AppColors.disabled,
-            ),
-          ),
-        ),
-      );
-    }
-
-    // Default: checkmark circle button
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () {
-        if (onTap != null) {
-          onTap();
-        } else if (widget.isCurrent && _state == _EngineState.awaitingAnswer) {
-          showAppToast(
-            context,
-            _isMultiQuestionBlock
-                ? AppStrings.engineAnswerAllQuestions
-                : AppStrings.engineSelectAnswer,
-          );
-        }
-      },
-      child: Container(
-        width: 48,
-        height: 48,
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          shape: BoxShape.circle,
-          boxShadow: AppDecorations.shadowStrong,
-        ),
-        child: Icon(
-          Icons.check,
-          color: enabled ? AppColors.primaryDark : AppColors.disabled,
-          size: 24,
-        ),
-      ),
+    return BlockMainButton(
+      label: label,
+      enabled: enabled,
+      onTap: onTap,
+      isEvaluating: _isEvaluatingWithAi,
+      disabledMessage: widget.isCurrent && _state == _EngineState.awaitingAnswer
+          ? (_isMultiQuestionBlock
+              ? AppStrings.engineAnswerAllQuestions
+              : AppStrings.engineSelectAnswer)
+          : null,
     );
   }
 }

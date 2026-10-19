@@ -37,6 +37,11 @@ dependencies:
   google_fonts: ^6.2.1
   flutter_svg: ^2.0.10
 
+  # Used by the course editor's preview channel (lib/preview) to talk to the
+  # parent frame. Already present transitively; declared here because it is now
+  # imported directly.
+  web: ^1.1.0
+
   # Database (Drift/SQLite)
   drift: ^2.15.0
   sqlite3_flutter_libs: ^0.5.18
