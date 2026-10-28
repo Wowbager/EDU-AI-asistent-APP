@@ -125,7 +125,8 @@ class _StepCard extends StatelessWidget {
   /// `StepContentRenderer` gates the feedback banners on `isAnswered`, so without
   /// this the author would see the options and nothing else — exactly the content
   /// they most need to check. No option is marked selected, so nothing claims the
-  /// student chose it.
+  /// student chose it, and `revealOnly` keeps the renderer from grading that empty
+  /// answer as wrong (a multi-select read „Špatně“ with its right answers in red).
   StepAnswerState? get _answerState =>
       step.isEvaluationStep ? const StepAnswerState(isAnswered: true) : null;
 
@@ -175,6 +176,7 @@ class _StepCard extends StatelessWidget {
               showSolution: true,
               hideResults: false,
               hideFeedback: false,
+              revealOnly: true,
             ),
             ..._branchMarkers(),
             ..._helpMarkers(),

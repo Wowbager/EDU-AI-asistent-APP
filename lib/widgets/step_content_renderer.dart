@@ -38,6 +38,11 @@ class StepContentRenderer extends StatelessWidget {
   final bool hideResults;   // When true, suppress correct/incorrect highlighting on option cards
   final bool hideFeedback;  // When true, suppress feedback banners and solution text
   final bool revealCorrectAnswer; // When false, mark the wrong pick but don't reveal the correct one (AGAIN retry)
+  /// The editor's "Náhled": the step is drawn as answered so the author reads
+  /// every part of it, but nobody answered, so nothing is graded. The right
+  /// answers are revealed as on a graded card; no verdict, and no red for an
+  /// answer that was never given.
+  final bool revealOnly;
 
   /// Attached to the first widget that only exists because the answer was
   /// graded — the option feedback, the AI feedback card or the solution
@@ -115,6 +120,7 @@ class StepContentRenderer extends StatelessWidget {
     this.hideResults = false,
     this.hideFeedback = false,
     this.revealCorrectAnswer = true,
+    this.revealOnly = false,
     this.feedbackAnchorKey,
     this.onOptionSelected,
     this.onMultipleOptionsSelected,
@@ -302,7 +308,7 @@ class StepContentRenderer extends StatelessWidget {
     // card: tick one of two correct options and the only coloured card on
     // screen is green, followed by that option's own approving feedback, so a
     // graded-wrong answer reads as a pass. This row says which it was.
-    if (config.allowMultiple && isAnswered && !hideResults) {
+    if (config.allowMultiple && isAnswered && !hideResults && !revealOnly) {
       final answeredCorrectly = answerState?.isCorrect ?? false;
       widgets.add(const SizedBox(height: 12));
       // First thing the student is shown after grading, so it takes the
@@ -524,6 +530,11 @@ class StepContentRenderer extends StatelessWidget {
               ? AppColors.success.withValues(alpha: 0.1)
               : AppColors.error.withValues(alpha: 0.1);
           borderColor = isCorrect ? AppColors.success : AppColors.error;
+        } else if (isMissedCorrect && revealOnly) {
+          // Nothing was picked, so nothing was missed: the right answers read
+          // as the radio path reveals them.
+          bgColor = AppColors.success.withValues(alpha: 0.05);
+          borderColor = AppColors.success.withValues(alpha: 0.5);
         } else if (isMissedCorrect) {
           bgColor = AppColors.error.withValues(alpha: 0.1);
           borderColor = AppColors.error;
@@ -560,7 +571,7 @@ class StepContentRenderer extends StatelessWidget {
                   isSelected ? Icons.check_box : Icons.check_box_outline_blank,
                   color: isSelected
                       ? AppColors.primary
-                      : isMissedCorrect
+                      : isMissedCorrect && !revealOnly
                           ? AppColors.error
                           : AppColors.surfaceLight,
                   size: 24,
@@ -730,14 +741,14 @@ class StepContentRenderer extends StatelessWidget {
     final locked = isAnswered && !guidedRetryOpen;
 
     Color fillColor() {
-      if (formative || !isAnswered || hideResults) return AppColors.background;
+      if (formative || !isAnswered || hideResults || revealOnly) return AppColors.background;
       return isCorrect
           ? AppColors.success.withValues(alpha: 0.1)
           : AppColors.error.withValues(alpha: 0.1);
     }
 
     Color disabledBorderColor() {
-      if (formative || hideResults) return AppColors.primaryDark16;
+      if (formative || hideResults || revealOnly) return AppColors.primaryDark16;
       return isCorrect ? AppColors.success : AppColors.error;
     }
 
@@ -808,7 +819,7 @@ class StepContentRenderer extends StatelessWidget {
       // key — "1/4 nebo slovy jedna čtvrtina nebo čtvrtka" — and the editor
       // promises them the student never sees it. The authored explanation
       // below is what teaches the answer.
-      if (!formative && isAnswered && !hideResults) ...[
+      if (!formative && isAnswered && !hideResults && !revealOnly) ...[
         const SizedBox(height: 12),
         Row(
           children: [
@@ -1259,7 +1270,7 @@ class StepContentRenderer extends StatelessWidget {
           hintText: AppStrings.stepNumericHint,
           hintStyle: AppTextStyles.bodyLarge(color: AppColors.primaryDark.withValues(alpha: 0.4)),
           filled: true,
-          fillColor: isAnswered && !hideResults
+          fillColor: isAnswered && !hideResults && !revealOnly
               ? (isCorrect
                   ? AppColors.success.withValues(alpha: 0.1)
                   : AppColors.error.withValues(alpha: 0.1))
@@ -1279,7 +1290,9 @@ class StepContentRenderer extends StatelessWidget {
           disabledBorder: OutlineInputBorder(
             borderRadius: AppDecorations.radiusS,
             borderSide: BorderSide(
-              color: hideResults ? AppColors.primaryDark16 : (isCorrect ? AppColors.success : AppColors.error),
+              color: hideResults || revealOnly
+                  ? AppColors.primaryDark16
+                  : (isCorrect ? AppColors.success : AppColors.error),
               width: 1.5,
             ),
           ),
