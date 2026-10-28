@@ -73,7 +73,38 @@ int _redThings(WidgetTester tester) {
   return count;
 }
 
+Widget _wrap(ContentBlock block) => MaterialApp(
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: PreviewExpandedBlock(
+            block: block,
+            exportMode: ExportMode.courseV2,
+            onRefTapped: (_) {},
+          ),
+        ),
+      ),
+    );
+
 void main() {
+  testWidgets('Náhled lists an answer\'s „Kam dál“ only where the app follows it',
+      (tester) async {
+    Map<String, dynamic> question({required bool several}) => {
+          'type': 'multiple_choice',
+          if (several) 'allow_multiple': true,
+          'options': [
+            {'id': 'o1', 'text': 'Ano', 'is_correct': true, 'go_to': 'END'},
+            {'id': 'o2', 'text': 'Ne', 'is_correct': false},
+          ],
+        };
+    await tester.pumpWidget(_wrap(_block(question(several: false))));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.call_split), findsOneWidget);
+
+    await tester.pumpWidget(_wrap(_block(question(several: true))));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.call_split), findsNothing);
+  });
+
   for (final entry in _questions.entries) {
     testWidgets('Náhled grades nothing on a ${entry.key} question', (tester) async {
       await tester.pumpWidget(MaterialApp(

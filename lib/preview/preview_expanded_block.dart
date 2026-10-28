@@ -268,6 +268,11 @@ class _StepCard extends StatelessWidget {
 
   /// Where each answer leads, read straight off the options.
   List<Widget> _branchMarkers() {
+    // Only where the engine follows an answer's `go_to`: never in an exercise
+    // card (`GoToResolver.resolve`), and never on a question with several picks,
+    // which reads no single answer's outcome (`BlockStepEngine`).
+    if (block.type == BlockType.exercise) return const [];
+    if (step.evaluationConfig?.allowMultiple == true) return const [];
     final options = step.evaluationConfig?.options ?? const [];
     final branching = options.where((o) => (o.goTo ?? '').isNotEmpty).toList();
     if (branching.isEmpty) return const [];
